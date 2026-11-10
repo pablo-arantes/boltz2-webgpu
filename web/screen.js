@@ -264,6 +264,19 @@ function drawScene() {
     // `display: none` again by the end of the run.
     revealViewer();
     const loaded = load([file("screen.pdb", pdb)]);
+    // 🔴 EVERY LOAD'S OWN RESULT, NOT THE PROBE'S RE-LOAD. `drawScene` runs
+    // after each ligand, so the viewer is handed `screen.pdb` several times
+    // under the SAME NAME - and the earlier reading of
+    // `framesAdded: 0` came from the probe loading that text a second time,
+    // which a duplicate object may legitimately report as nothing added. These
+    // are the page's own calls, in order, so the first can be told from the
+    // repeats.
+    const loads = (globalThis.__sceneLoads ??= []);
+    const record = { call: loads.length + 1, atoms: (pdb.match(/^(ATOM|HETATM)/gm) ?? []).length };
+    loads.push(record);
+    Promise.resolve(loaded)
+      .then((result) => { record.settled = result ?? null; })
+      .catch((error) => { record.error = String(error?.message ?? error); });
     Promise.resolve(loaded)
       .then(() => { revealViewer(); requestAnimationFrame(revealViewer); })
       // 🔴 AN ASYNC REFUSAL MUST BE REPORTED, NOT SWALLOWED. `py2dmolLoadFiles`

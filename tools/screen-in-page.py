@@ -244,6 +244,25 @@ def main():
         # container is visible and sized, the promise resolves, no error is
         # reported, and the structure picker is empty. Walk the registry rather
         # than guess which field holds the structures.
+        print("page loads:", cdp.evaluate(ws, "globalThis.__sceneLoads ?? 'none'"))
+        # 🔴 py2Dmol'S OWN STATE, which it exposes as `window.buildViewerState`.
+        # The parser is sound - with no MODEL records it still pushes one model
+        # at the end - so `framesAdded: 0` comes from a step after parsing, and
+        # this splits the two possibilities: the object is in the state and the
+        # renderer was never pointed at it, or the object was never created.
+        print("viewer state:", cdp.evaluate(ws, """(() => {
+          try {
+            const s = globalThis.buildViewerState?.();
+            if (!s) return 'no buildViewerState';
+            const objects = s.objects ?? [];
+            return { keys: Object.keys(s).slice(0, 12), objects: objects.length,
+              each: objects.slice(0, 4).map((o) => ({
+                name: o?.name ?? o?.id ?? '?',
+                frames: (o?.frames ?? []).length,
+                atoms: (o?.frames?.[0]?.coords ?? o?.coords ?? []).length })),
+              current: s.currentObject ?? s.selected ?? null };
+          } catch (e) { return 'threw: ' + (e?.message ?? e); }
+        })()"""))
         print("pdb head:", cdp.evaluate(ws,
               "(globalThis.__scenePdb ?? '(none)').split('\\n').slice(0,3)"))
         print("pdb lines:", cdp.evaluate(ws,

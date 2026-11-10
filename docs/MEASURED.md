@@ -290,12 +290,61 @@ which is why this survived.
 block (py2Dmol's parser delimits frames on `MODEL` records, and LocalFold's own
 PDBs arrive as a trajectory). Recorded so neither is tried a third time.
 
-**The next measurement**, and it is a confound in the ones above:
-`loader says:` in the probe is the probe's OWN second load of the same text, and
-py2Dmol may legitimately report `framesAdded: 0` for an object it already holds.
-Capture the PAGE's first load result - assign the return of `load(...)` in
-`drawScene` to a global and read THAT - before concluding anything further about
-the frame count.
+### The confound is eliminated, and the object is never created
+
+`drawScene` now records every one of the PAGE's own loads
+(`globalThis.__sceneLoads`), so the first can be told from the repeats:
+
+```
+call 1, 279 atoms -> {objectsLoaded: 1, structureCount: 1, framesAdded: 0}
+call 2, 289 atoms -> {objectsLoaded: 1, structureCount: 1, framesAdded: 0}
+```
+
+So `framesAdded: 0` is not a duplicate-object artefact: the FIRST load reports
+it too. And py2Dmol's own state, which it exposes as
+`window.buildViewerState()`, is empty:
+
+```
+{ keys: [version, config, objects, current_object, viewer_state,
+         selections_by_object],
+  objects: 0, current_object: null }
+```
+
+🔴 **SO `objectsLoaded: 1` IS A COUNT OF FILES IT MEANT TO LOAD, NOT OBJECTS IT
+ADDED.** The object is never created, and the renderer holding
+`coords: array(0)` is the consequence rather than the fault.
+
+### What is ruled out, and where the fault must be
+
+- **The PDB is fine** - 279-284 well-formed `ATOM` records.
+- 🔴 **THE PARSER IS FINE, AND THE `MODEL` HYPOTHESIS WAS WRONG FOR A REASON
+  THAT COULD HAVE BEEN READ FIRST.** With no `MODEL` records the atoms
+  accumulate and the parser pushes one model at the end anyway:
+  `return n.length>0&&t.push(n), 0===t.length&&n.length>0&&t.push(n)`. A bare
+  `ATOM` file yields a frame, which is why wrapping the scene in
+  `MODEL`/`ENDMDL` changed nothing.
+- **The commit path is `handleIncrementalStateUpdate`**, which the registry
+  exposes per viewer and which does the `addObject`/`addFrame` work:
+  `for (const t of Object.keys(e)) p.objectsData[t] || (p.addObject(t), ...)`
+  then `p.addFrame(e, t)` and `p.render("handleIncrementalStateUpdate")`.
+- **The dispatch is keyed by viewer id**: the bundle resolves its target as
+  `py2dmol_viewers[window.viewerConfig.viewer_id]`, and
+  `o = t || i.viewer_id || e?.id || null` with `i = window.viewerConfig || {}`.
+  Neither page sets `window.viewerConfig` itself - the bundle writes it - and on
+  this page the registry key is `standalone-viewer-1`.
+
+**So the fault is between the parse and `handleIncrementalStateUpdate`:** either
+`processFiles` builds its frames map and dispatches to a viewer id that does not
+match this page's, or it declines to build the object for a reason it does not
+report. The next step is to read `processFiles` from the structure branch to its
+`Se(...)`/`handleIncrementalStateUpdate` call and see which viewer id it passes
+and what it requires - NOT to try another input shape. Two input-shape guesses
+(a `_scores.json`, a `MODEL` block) have already been tried and reverted.
+
+**A second route, if that reading is slow:** `handleIncrementalStateUpdate` is
+callable directly off the registry, so the page could build the frames map and
+commit the object itself, bypassing `processFiles` entirely. That is more code
+to own but it is a path whose contract is visible in the bundle.
 
 **And the gate that should have caught it now exists.**
 `tools/screen-in-page.py` asserts the computed style, the canvas's drawing
