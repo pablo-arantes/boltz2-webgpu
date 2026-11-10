@@ -25,6 +25,8 @@ import {
   linearTriples,
 } from "./conformer.js";
 import { ELEMENT_SYMBOLS } from "../af3/featurise/ccd-component.js";
+import { canonicalRanks } from "./canonical-rank.js";
+import { canonicalAtomNames } from "./canon-input.js";
 
 /**
  * Build a component from a SMILES string.
@@ -125,7 +127,20 @@ export async function smilesComponent(smiles, options = {}) {
     // field, so it is present and false rather than absent.
     leaving: false,
   }));
-  nameAtoms(atoms, graph);
+  // 🔴 TWO FAMILIES, TWO NAMING RULES, AND THE NAMES ARE A MODEL INPUT. AF3
+  // numbers each element as it is met (`C1, C2, ...`); Boltz-2 numbers every
+  // atom by its CANONICAL RANK on the hydrogen-added molecule
+  // (`boltz/data/parse/schema.py`). They agree on almost nothing, and
+  // `ref_atom_name_chars` is 256 of the 388 atom-encoder input columns, so
+  // handing Boltz-2 AF3's names is a wrong feature rather than a cosmetic
+  // difference - spec/G8-RESULT.md measures it. The default stays AF3's,
+  // because seven of the eight families in this tree want it.
+  if (options.atomNames === "canonical") {
+    const named = canonicalAtomNames(graph, (g) => canonicalRanks(g));
+    atoms.forEach((atom, index) => { atom.name = named[index]; });
+  } else {
+    nameAtoms(atoms, graph);
+  }
 
   return {
     code,

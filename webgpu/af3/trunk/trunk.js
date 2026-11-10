@@ -317,6 +317,16 @@ export class Af3TrunkGpu {
       // 🔴 AND `--f16=off` AND `--tune=` CANNOT REACH THEM. The pins go through
       // the CONSTRUCTOR; three `--tune` arms read an identical 5.11e-4 and said
       // only that they had not run. See docs/AF3.md.
+      // 🔴 AND UPSTREAM'S AFFINITY TRUNK HAS NO TEMPLATE STAGE AT ALL, which is
+      // a property of its CHECKPOINT and not a setting: `boltz2_aff.ckpt`
+      // carries no `template_module`, so `Boltz2.__init__` leaves
+      // `use_templates` false and the `z = z + template_module(z, ...)` line
+      // never runs. Every other stage's weights in that checkpoint are
+      // BYTE-IDENTICAL to the structure checkpoint's (measured: relRMS exactly
+      // 0 over all 5019 shared tensors), so the template module is the one
+      // thing the affinity trunk is missing - and an empty stage here is not a
+      // no-op, as the note below says.
+      if (input.noTemplate !== true) {
       await stage("template", () => new Af3TemplateEmbedderGpu(this.device, {
         ...this.options,
         stagedPrecision: "f32", weightPrecision: "f32", accumulatePrecision: "f32",
@@ -337,6 +347,7 @@ export class Af3TrunkGpu {
         // 🔴 THE TEMPLATE TERM IS ADDED INTO THE EMBEDDER'S PAIR, on the device
         // now: `pairBuffer` is read as z and updated in place as z + term.
         weights.template, dialect, { ...options, pairBuffer: pair.buffer, validation }));
+      }
       // ...and its working set given back to the driver before the MSA stack
       // asks for five pair-sized buffers of its own: see settleReleasedMemory.
       await settleReleasedMemory(this.device);

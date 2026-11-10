@@ -290,6 +290,7 @@ export const ALPHAFOLD3 = Object.freeze({
   // see tools/check-batch-fields.js --target=gol-sep3, which is the dump that
   // can.
   atomizedElementNames: false,
+  smilesCanonicalAtomNames: false,
   atomizedUnknownRestype: false,
   atomizedUnknownMsa: false,
   atomizedBackboneBonds: false,
@@ -454,6 +455,7 @@ export const OPENBIND0 = Object.freeze({
   dedupeSelfMsa: false,
   dropTerminalAtoms: true,
   atomizedElementNames: false,
+  smilesCanonicalAtomNames: false,
   atomizedUnknownRestype: "aatype",   // (of3: UNK on the restype alone, the alignment keeps the letter)
   atomizedUnknownMsa: false,
   atomizedBackboneBonds: "both",   // (of3: a link only between two atomised residues)
@@ -676,6 +678,7 @@ export const OPENDDE = Object.freeze({
   dedupeSelfMsa: true,
   dropTerminalAtoms: false,
   atomizedElementNames: false,
+  smilesCanonicalAtomNames: false,
   atomizedUnknownRestype: false,
   atomizedUnknownMsa: false,
   atomizedBackboneBonds: false,
@@ -810,6 +813,7 @@ export const PROTENIX2 = Object.freeze({
   dedupeSelfMsa: true,
   dropTerminalAtoms: false,
   atomizedElementNames: false,
+  smilesCanonicalAtomNames: false,
   atomizedUnknownRestype: false,
   atomizedUnknownMsa: false,
   atomizedBackboneBonds: false,
@@ -1005,6 +1009,15 @@ export const BOLTZ2 = Object.freeze({
   dedupeSelfMsa: true,
   dropTerminalAtoms: true,
   atomizedElementNames: false,
+  // 🔴 A SMILES LIGAND'S ATOM NAMES COME FROM A CANONICAL RANK, NOT FROM A
+  // RUNNING COUNT, AND boltz2 IS THE ONLY FAMILY THAT WANTS IT.
+  // `boltz/data/parse/schema.py` names every atom
+  // `GetSymbol().upper() + str(CanonicalRankAtoms(AddHs(mol))[i] + 1)`;
+  // AF3 numbers each element as it meets it. The names are
+  // `ref_atom_name_chars` - 256 of the 388 atom-encoder input columns in
+  // spec/G8-RESULT.md - so the wrong rule is a wrong feature on every
+  // SMILES ligand, not a label. shared/chem/canon-input.js builds it.
+  smilesCanonicalAtomNames: true,
   atomizedUnknownRestype: true,
   atomizedUnknownMsa: false,
   atomizedBackboneBonds: false,
@@ -1289,6 +1302,7 @@ export const INTELLIFOLD2 = Object.freeze({
   dedupeSelfMsa: true,
   dropTerminalAtoms: true,
   atomizedElementNames: false,
+  smilesCanonicalAtomNames: false,
   atomizedUnknownRestype: false,
   atomizedUnknownMsa: false,
   atomizedBackboneBonds: false,
@@ -1516,6 +1530,7 @@ export const ROSETTAFOLD3 = Object.freeze({
   dedupeSelfMsa: true,
   dropTerminalAtoms: true,
   atomizedElementNames: true,
+  smilesCanonicalAtomNames: false,
   // 🔴 "nucleic": a modified NUCLEOTIDE's atomised tokens are unknown (20) too, not the parent base - native atomworks
   // puts restype and profile 20 on all 160 atomised 5CM tokens of methylated_dna (af3-any-model 0464f71: the parent base
   // read pLDDT 84.2 against native's 78.5). true is an atomised amino acid's alone (boltz2's one token, chai-1)
@@ -1639,6 +1654,7 @@ export const CHAI1 = Object.freeze({
   // (no OXT and, since af3-any-model 1f9b3cf, no 5' OP3 either: chai-lab's conformers carry neither)
   dropTerminalAtoms: true,
   atomizedElementNames: false,
+  smilesCanonicalAtomNames: false,
   // (chai-lab's DX/RX: a modified NUCLEOTIDE's atomised tokens read the unknown nucleotide, 30, which the r3 blob's
   // DX row tells apart on DNA - af3-any-model 1f9b3cf; an amino acid's read 20, as `true`)
   atomizedUnknownRestype: "chai",
@@ -1807,6 +1823,7 @@ export function featuriserDialect(dialect) {
     dedupeSelfMsa: dialect.dedupeSelfMsa,
     nativeNonproteinMsa: dialect.nativeNonproteinMsa,
     atomizedElementNames: dialect.atomizedElementNames,
+    smilesCanonicalAtomNames: false,
     atomizedUnknownRestype: dialect.atomizedUnknownRestype,
     atomizedUnknownMsa: dialect.atomizedUnknownMsa,
     atomizedBackboneBonds: dialect.atomizedBackboneBonds,

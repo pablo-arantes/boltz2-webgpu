@@ -998,6 +998,10 @@ async function foldHolding(device, batch, weights, options, held) {
       // constant. Under `templateMeanOverAllSlots` this number is the divisor,
       // so it decides the term's magnitude and not just how much work is done.
       templates: options.templates ?? 4,
+      // 🔴 NAMED HERE OR THROWN AWAY: see the note below on this literal. The
+      // affinity pass sets it because upstream's affinity checkpoint has no
+      // template module.
+      noTemplate: options.noTemplate === true,
       targetFeat,
       features: batch.features,
       msaRows: passMsa.msa,

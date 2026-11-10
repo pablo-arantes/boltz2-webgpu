@@ -486,7 +486,15 @@ export async function foldAf3(options) {
       // dictionary entry to look up: `smilesComponent` returns exactly what
       // `parseCcdComponent` returns, so nothing downstream can tell which
       // producer made it. See shared/chem/component.js.
-      ligands.push(await smilesComponent(entry.smiles, { code: entry.code ?? "LIG" }));
+      // ...and its ATOM NAMES follow the dialect: boltz2 numbers them by
+      // canonical rank, every other family by a running per-element count.
+      // See `smilesCanonicalAtomNames` in shared/af3/dialect.js - the names
+      // reach the model as `ref_atom_name_chars`.
+      ligands.push(await smilesComponent(entry.smiles, {
+        code: entry.code ?? "LIG",
+        ...(options.weights?.trunk?.dialect?.smilesCanonicalAtomNames
+          ? { atomNames: "canonical" } : {}),
+      }));
       continue;
     }
     await component(entry, "ligand");

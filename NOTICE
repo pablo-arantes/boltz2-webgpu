@@ -1,0 +1,66 @@
+Boltz-2 WebGPU — virtual screening in the browser
+=================================================
+
+This repository is a FORK. It is a clone of LocalFold at the pinned commit
+below, with a Boltz-2 affinity module and a screening page added on top.
+
+Upstream: LocalFold
+-------------------
+  https://github.com/sokrypton/localfold
+  pinned commit 357518613af612b4e1e887deecd93bd612fdac76 (see notes/ and spec/)
+  © Sergey Ovchinnikov, "THE BEER-WARE LICENSE" (Revision 42) — see LICENSE.
+
+LocalFold's own README is kept verbatim as README-localfold.md rather than
+overwritten, and its licence file is unchanged. Everything in this tree that is
+not listed as new below is LocalFold's work: the WebGPU runtime, the AF3-lineage
+trunk, diffusion and confidence stacks, the weight loaders and quantisation, the
+featurisers, the SMILES chemistry, the page shell and the whole gate harness.
+
+What is new in this fork
+------------------------
+Written for this project (see README.md, "What is reverse-engineered from
+upstream Boltz", for what each one was derived from and how it is checked):
+
+  screen.html, web/screen*.js        the screening page, its 3D scene, plot,
+                                     CSV and ZIP export
+  web/affinity-*.js                  the two-pass affinity run
+  webgpu/af3/affinity/, cpu/af3/affinity/
+                                     the affinity module: kernels and the
+                                     float64 reference
+  shared/af3/affinity/               the crop and featurisation
+  shared/chem/canonical-rank.js, canon-partitions.js, canon-input.js
+                                     RDKit's canonical atom ranking, ported
+  tools/g0_verify.py, g8_compare.py, g8_localise.py,
+  tools/export_boltz2_affinity.py, tools/oracle/dump_boltz2_*.py
+                                     the checkpoint readers and the comparisons
+                                     against upstream PyTorch Boltz-2
+
+New code in this fork is offered under the MIT licence (LICENSE-MIT). Where a
+file is a modification of a LocalFold file it remains under LocalFold's terms;
+the Beer-Ware licence permits this and asks only that you buy the author a beer
+if you meet them and think the work is worth it.
+
+Model parameters — NOT in this repository
+-----------------------------------------
+No weights are committed. Every bundle is fetched at runtime from a pinned
+revision URL in shared/bundles/manifests/index.js.
+
+  Boltz-2 (boltz-community/boltz-2)
+      MIT licence. The affinity export in this fork is derived from
+      boltz2_aff.ckpt at revision 6fdef46d763fee7fbb83ca5501ccceff43b85607.
+
+  AlphaFold 3 parameters
+      🔴 NOT REDISTRIBUTED HERE, AND NOT REDISTRIBUTABLE BY US. The AF3
+      parameters reachable through LocalFold's exports carry Google DeepMind's
+      own terms, which are not an open-source licence: they restrict who may
+      use them and for what, and they do not permit redistribution. This
+      repository ships no AF3 parameter file and no mirror of one. Obtain them
+      from DeepMind under their terms if you want to run those models.
+
+  Upstream Boltz-2 checkpoints
+      Fetched into refs/ by tools/fetch_boltz_cache.sh, which is gitignored.
+      They are needed only to RE-RUN the comparisons in spec/G8-RESULT.md, never
+      to run the page.
+
+Third-party code vendored by LocalFold (py2Dmol, ProteinMPNN weights and
+others) keeps its own licence; see README-localfold.md and web/vendor/.

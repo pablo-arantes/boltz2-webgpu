@@ -1,0 +1,574 @@
+<!--
+screen.html
+-----------
+One protein target, many ligands, co-folded with Boltz-2 on WebGPU and scored
+by its affinity module - in the browser, with nothing but the ColabFold MSA
+search leaving the machine.
+
+🔴 A SECOND PAGE RATHER THAN A MODE OF THE FIRST. index.html is py2Dmol's own
+application wired to one fold; a screen is a different shape of job (a queue, a
+ranked table, a scatter, one scene built up) and bolting it onto that page would
+mean two layouts fighting over the same DOM. The MODULES are shared - the
+featuriser, the weights, the kernels, the superposition, the zip writer - and
+only the page is new.
+-->
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LocalFold - Boltz-2 virtual screen</title>
+  <link rel="stylesheet" href="./web/vendor/py2Dmol.app.css">
+  <link rel="stylesheet" href="./web/screen.css">
+</head>
+
+<body>
+  <header class="row">
+    <h1>LocalFold <span>&middot; Boltz-2 virtual screen</span></h1>
+    <div class="grow"></div>
+    <button id="run" class="primary" disabled>Screen</button>
+    <button id="stop" disabled>Stop</button>
+    <button id="download" disabled>Download ZIP</button>
+  </header>
+
+  <div id="screen-status">Loading&hellip;</div>
+
+  <div class="card">
+    <div class="row">
+      <label for="sequence">Target</label>
+      <span class="note" id="sequence-note">one protein chain, amino acids</span>
+      <div class="grow"></div>
+      <label for="msa">MSA</label>
+      <select id="msa">
+        <!-- 🔴 SINGLE SEQUENCE IS THE DEFAULT, because it is the only mode that
+             sends nothing anywhere. The brief requires the option to stay. -->
+        <option value="none" selected>Single sequence (nothing leaves this machine)</option>
+        <option value="mmseqs2">MMseqs2 search (api.colabfold.com, once per target)</option>
+      </select>
+    </div>
+    <textarea id="sequence" rows="3" spellcheck="false"
+      placeholder="MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQ"></textarea>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <label for="smi-file">Ligands</label>
+      <input type="file" id="smi-file" accept=".smi,.smiles,.txt">
+      <span class="note" id="ligand-note">a .smi file, or one SMILES a line below</span>
+    </div>
+    <textarea id="ligands" rows="4" spellcheck="false"
+      placeholder="CCO ethanol&#10;CCCc1ccccc1O propofol-ish&#10;CC(=O)Oc1ccccc1C(=O)O aspirin"></textarea>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <label for="seed">Seed</label><input type="number" id="seed" value="0" min="0">
+      <label for="recycles">Recycles</label><input type="number" id="recycles" value="3" min="0" max="10">
+      <label for="steps">Steps</label><input type="number" id="steps" value="100" min="2" max="400">
+      <label for="samples">Samples</label><input type="number" id="samples" value="1" min="1" max="5">
+      <div class="grow"></div>
+      <!-- 🔴 THE NUMBER TO QUOTE FOR ACCURACY IS NOT THE DEFAULT HERE, and the
+           page says so rather than hiding it. upstream's own affinity pass is
+           5 recycles, 200 steps and 5 samples - 1,000 denoiser calls a ligand. -->
+      <span class="note">upstream's affinity settings are 5 / 200 / 5; these default lower</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row"><label>Queue</label><div class="grow"></div>
+      <span class="note" id="eta"></span></div>
+    <div id="queue"></div>
+  </div>
+
+  <div class="split">
+    <div class="card">
+      <div class="row">
+        <label>Scene</label>
+        <span class="note" id="scene-note">target drawn once; every ligand superposed onto run&nbsp;#1</span>
+      </div>
+      <!--
+        🔴 py2Dmol's OWN DOM, COPIED VERBATIM FROM index.html, AND THAT IS A
+        CONTRACT RATHER THAN A CHOICE. The vendor bundle initialises by
+        `getElementById` on fifteen ids and builds its viewer inside
+        `#viewer-container`; a page that gives it a bare `<div id="viewer">`
+        gets no viewer at all and no error - `window.py2dmol_viewers` is simply
+        empty, which is exactly how this page failed its first probe run.
+        test/py2dmol-scaffold.test.js holds this subtree's id set against
+        index.html's, so the two cannot drift in silence.
+      -->
+        <div id="viewer-container" class="py2dmol-viewer-instance" style="display: none;">
+
+            <div id="mainContainer">
+
+                <div id="viewerColumn">
+                    <!-- data-autosize="css": THE STYLESHEET OWNS THIS BOX, so
+                         py2Dmol's setupViewport writes no inline width and a
+                         media query can reach it. Without it every rule aimed
+                         at this box loses to an attribute set at load, and the
+                         failure reads as a media query that is not matching. -->
+                    <div id="canvasContainer" class="container-box" data-autosize="css">
+                        <canvas id="canvas"></canvas>
+                        <!-- Resize handle -->
+                        <div class="resize-handle"></div>
+                    </div>
+                    <div id="controlsContainer" class="container-box">
+                        <button id="playButton" class="btn btn-secondary btn-icon-only"><i
+                                class="fa-solid fa-play"></i></button>
+                        <input type="range" id="frameSlider" min="0" max="0" value="0">
+                        <span id="frameCounter">0 / 0</span>
+                        <button id="speedButton" class="btn btn-grey btn-icon-only"
+                            title="Cycle playback speed">1x</button>
+                        <button id="overlayButton" class="btn btn-secondary" title="Overlay all frames"
+                            style="font-weight: 400;">⧉</button>
+                    </div>
+                </div>
+
+                <!-- Right side panels container -->
+                <div id="rightPanelsContainer">
+                    <div id="rightPanelContainer" class="container-box">
+
+                        <!-- Toolbar (two rows) -->
+                        <div id="navigationControls" class="toolbar" style="margin-bottom: 4px;">
+                            <div class="toolbar-row">
+                                <label class="btn-toggle btn-flex" id="orientToggle" title="Orient to best view">
+                                    <input type="checkbox" style="display: none;">
+                                    <span><i class="fa-solid fa-crosshairs"></i>Orient</span>
+                                </label>
+
+                                <!-- FOCUS IS A LATCH, so it says aria-pressed
+                                     rather than aria-expanded - the shared rule
+                                     in style.css lights either. Beside Orient
+                                     because the two are the camera moves a
+                                     CLICK makes: Orient frames everything,
+                                     Focus moves in on one thing.
+                                     NOT crosshairs: Orient wears those, right
+                                     beside it. A magnifier is what the mode
+                                     does - look closely at one thing - and it
+                                     is the only one on the page, so it cannot
+                                     be read as search. -->
+                                <button id="focusButton" class="btn-toggle btn-flex"
+                                    aria-pressed="false"
+                                    title="Click a residue or ligand to draw its neighbours' side chains, move in on it and clip around it. The view does not turn. Click the background to come back out.">
+                                    <span><i class="fa-solid fa-magnifying-glass"></i>Focus</span>
+                                </button>
+
+                                <!-- Rotate: checkbox styled as a button -->
+                                <label class="btn-toggle btn-flex" id="rotateToggle" title="Toggle auto-rotation">
+                                    <input type="checkbox" id="rotationCheckbox">
+                                    <span><i class="fa-solid fa-rotate"></i>Rotate</span>
+                                </label>
+
+
+                            </div>
+
+                            <div class="toolbar-row">
+                                <button id="styleToggle" class="btn-toggle btn-flex"
+                                    aria-expanded="false" aria-controls="stylePanel"
+                                    title="Render style and its settings">
+                                    <span><i class="fa-solid fa-palette"></i>Style</span>
+                                </button>
+
+                                <!-- Clip: PyMOL's near/far slab, cutting the drawing. -->
+                                <label class="btn-toggle btn-flex" id="clipToggle"
+                                    title="Clip the view to a slab, as in PyMOL: near and far planes that cut the drawing">
+                                    <input type="checkbox" id="clipCheckbox">
+                                    <span><i class="fa-solid fa-cube"></i>Clip</span>
+                                </label>
+
+                                <button id="saveImageButton" class="btn-toggle btn-flex"
+                                    aria-expanded="false" aria-controls="savePanel"
+                                    title="Capture an image or a video">
+                                    <span><i class="fa-solid fa-camera"></i>Capture</span>
+                                </button>
+                            </div>
+                        </div>
+
+
+                        <!-- WHICH OBJECT, and how many. Directly under the
+                             buttons because everything below it - Style, Clip,
+                             Capture - acts on the object named here: pick an
+                             object and the panels below describe THAT object.
+                             Multi puts every object on screen at once; the
+                             eyes decide what is drawn and the picker still
+                             decides which one you are editing. -->
+                        <!-- OBJECTS: ONE AT A TIME, WHICH ON THIS PAGE IS THE
+                             ONLY HONEST MODE.
+                             The picker chooses which prediction run is on
+                             screen and being edited. py2Dmol also has MULTI -
+                             a button that opens a list of eyes and draws
+                             several objects merged into one array - and it is
+                             deliberately NOT MOUNTED here.
+
+                             🔴 EVERYTHING ELSE ON THIS PAGE DESCRIBES ONE
+                             FOLD. The scores card is `lastPrediction`'s, the
+                             heatmap panel is `viewerObject`'s, and both
+                             download buttons write the archive of a single
+                             run - so with two runs merged the card states one
+                             fold's pLDDT over a picture of two, and the panel
+                             goes altogether, because a merge of two objects
+                             has no PAE by construction (see _mergeObjects).
+                             Multi is a mode this page's own chrome cannot
+                             describe, and comparing two runs is what the
+                             picker is for.
+
+                             REMOVED, NOT HIDDEN, so there is no state to get
+                             wrong - the same choice py2Dmol's own render.html
+                             makes about the toolbar buttons it cannot honour.
+                             Every consumer in src/app/objects.js already
+                             guards on the button being absent
+                             (`if (!btn || !list ...) return`), so what is lost
+                             is the feature and not the page. -->
+                        <div id="objectRow" class="toggle-item object-row">
+                            <!-- WHICH OBJECT: the picker, and the only way to
+                                 choose one here. It names the object on screen AND
+                                 the one being edited, which on this page are always
+                                 the same object. Every other path drives the current
+                                 object through this select: the renderer's change
+                                 listener, the prev/next buttons, a restored session.
+                                 With the Multi button gone this is all the row holds,
+                                 so py2Dmol hides the row itself until there is more
+                                 than one object to pick - which is what a page with a
+                                 single prediction should show. -->
+                            <select id="objectSelect" class="object-picker"
+                                title="Which object to show and edit"
+                                style="min-width: 110px; height: 28px; font-size: 12px; padding: 0 8px;">
+                                <!-- Initially empty -->
+                            </select>
+                        </div>
+
+                        <style>
+                            /* Inline display:flex on the style rows outranks the UA [hidden]
+                               rule, so force it. Scoped to the style panel + its trigger. */
+                            #styleAppearanceContainer [hidden] { display: none !important; }
+                            /* Open cue is the shared .btn-toggle[aria-expanded] rule
+                               in style.css - the same green as a checked toggle. */
+                        </style>
+                        <!-- CLIP PANEL. PyMOL's clip: a slab in camera space, set as a
+                             RANGE - two knobs on one track, far on the left and near on
+                             the right, which cannot cross. No figures: where the knobs
+                             are IS the answer, and the picture shows the rest.
+                             Switching Clip off puts the panel away and LEAVES the cut;
+                             AUTO is what re-cuts: it fits the slab to the selection,
+                             and with nothing selected that is the uncut rest state -
+                             which is what the button used to say Reset for. -->
+                        <style>
+                            /* [hidden] is a UA rule and an inline display:flex outranks
+                               it - the same trap the style panel documents below. */
+                            #clipPanel[hidden] { display: none !important; }
+                            /* THE TWO HANDLES SHARE ONE TRACK. Both inputs sit on the
+                               same line, transparent, so what you see is the track drawn
+                               underneath and the two thumbs on it. pointer-events are
+                               off for the input body and back on for the thumb, or the
+                               upper input would swallow every click meant for the lower
+                               one. */
+                            /* TWO IDS, DELIBERATELY. src/app/style.css styles every range
+                               input in the viewer with
+                               `.py2dmol-viewer-instance input[type="range"]:not(#frameSlider)`,
+                               and :not(#frameSlider) counts an ID - so that rule outranks
+                               a single-id selector here and kept painting its own 6px grey
+                               bar and its own blue thumb. That bar on top of this one is
+                               the "two bars" this control was showing. */
+                            #clipPanel #clipRange { position: relative; height: 24px; flex: 1; min-width: 0; }
+                            #clipPanel #clipRange .track {
+                                position: absolute; left: 0; right: 0; top: 10px; height: 4px;
+                                background: #e5e7eb; border-radius: 2px;
+                            }
+                            #clipPanel #clipRange .span {
+                                position: absolute; top: 10px; height: 4px;
+                                background: #2563eb; border-radius: 2px;
+                            }
+                            #clipPanel #clipRange input[type=range] {
+                                position: absolute; left: 0; top: 0; width: 100%; height: 24px;
+                                margin: 0; padding: 0; background: transparent; pointer-events: none;
+                                border-radius: 0; outline: none;
+                                -webkit-appearance: none; appearance: none;
+                            }
+                            /* the track each input paints for itself, out of the way */
+                            #clipPanel #clipRange input[type=range]::-webkit-slider-runnable-track {
+                                background: transparent; border: none; height: 24px;
+                            }
+                            #clipPanel #clipRange input[type=range]::-moz-range-track {
+                                background: transparent; border: none; height: 24px;
+                            }
+                            #clipPanel #clipRange input[type=range]::-moz-range-progress {
+                                background: transparent;
+                            }
+                            #clipPanel #clipRange input[type=range]::-webkit-slider-thumb {
+                                pointer-events: auto; -webkit-appearance: none; appearance: none;
+                                width: 14px; height: 14px; margin-top: 5px; border-radius: 50%;
+                                background: #fff; border: 2px solid #2563eb; box-shadow: none;
+                                cursor: pointer;
+                            }
+                            #clipPanel #clipRange input[type=range]::-moz-range-thumb {
+                                pointer-events: auto; width: 14px; height: 14px; border-radius: 50%;
+                                background: #fff; border: 2px solid #2563eb; box-shadow: none;
+                                cursor: pointer;
+                            }
+                        </style>
+                        <!-- TWO LINES: the planes, then how soft they are. Each row
+                             spells out flex-direction ROW - the panel is a COLUMN and
+                             .control-group is one too, and inheriting that once stacked
+                             the readouts above a track with no width at all: the handles
+                             were there and unusable. -->
+                        <div id="clipPanel" hidden class="control-group"
+                            style="display: flex; flex-direction: column; align-items: stretch; gap: 6px; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; padding: 8px; margin-bottom: 4px;">
+                            <div style="display: flex; flex-direction: row; align-items: center; gap: 8px;">
+                                <label for="clipNear" class="font-medium text-gray-700"
+                                    style="width: 34px; font-size: 11px; flex-shrink: 0;"
+                                    title="Drag the two knobs to clip the view between them">Clip:</label>
+                                <div id="clipRange" title="Drag the two knobs to clip the view between them">
+                                    <div class="track"></div>
+                                    <div class="span" id="clipSpan"></div>
+                                    <input type="range" id="clipFar" aria-label="Far clipping plane">
+                                    <input type="range" id="clipNear" aria-label="Near clipping plane">
+                                </div>
+                                <button id="clipAutoButton" class="btn btn-grey btn-small"
+                                    title="Fit the slab to the selection - or uncut, with nothing selected"
+                                    style="font-size: 11px;">Auto</button>
+                            </div>
+                            <div style="display: flex; flex-direction: row; align-items: center; gap: 8px;">
+                                <label for="clipFadeSlider" class="font-medium text-gray-700"
+                                    style="width: 34px; font-size: 11px; flex-shrink: 0;"
+                                    title="Soft edge: how far outside each plane the drawing fades out instead of stopping. 0 is a hard cut.">Fade:</label>
+                                <input type="range" id="clipFadeSlider" min="0" max="100" value="10" step="5"
+                                    style="flex: 1; min-width: 0; outline: none;"
+                                    title="Soft edge: how far outside each plane the drawing fades out instead of stopping. 0 is a hard cut.">
+                                <!-- Auto stands over this space on the row above; without
+                                     it the two tracks would end in different places, which
+                                     is the whole reason the rows were split. -->
+                                <span aria-hidden="true" id="clipResetSpacer"
+                                    style="width: 51px; flex-shrink: 0;"></span>
+                            </div>
+                        </div>
+
+                        <div id="styleAppearanceContainer" class="control-group">
+
+                            <!-- The Style panel is BUILT by parts/panel.js and inserted here by
+                                 ui.js. It used to be written out in full in this file AND again
+                                 in the other page, under a note saying to edit both - which had
+                                 already been missed in both directions. -->
+                            <div id="stylePanelMount"></div>
+
+
+
+                        </div>
+
+
+                    </div>
+
+                    <!-- SELECTION PANEL. These tools act on the 3D structure,
+                         not on the sequence, and a selection can just as well be
+                         made by clicking the canvas or the PAE map - so their
+                         home in the sequence header was never quite right. Here
+                         they sit beside the thing they change.
+
+                         IT IS BUILT AT RUNTIME by py2Dmol's parts/panel.js, the
+                         way the Style panel above it is, and this element says
+                         only WHERE it goes. It used to be two hundred and
+                         eighty lines of markup pasted here from py2Dmol's own
+                         index.html - a second copy of a panel that grows rows,
+                         which is the thing that copy existed to make hard. The
+                         bundle carries the rows, the wiring AND the stylesheet
+                         now; what this page still owns is the layout slot. -->
+                    <div id="selectionPanelMount"></div>
+
+                    <!-- THE HEATMAP PANEL, which used to be the PAE panel and
+                         draws any map now - PAE and the trunk's contact map,
+                         picked with a tab strip.
+
+                         🔴 THE NEW IDS, AND THE RENAME IS NOT COSMETIC. The
+                         panel's JS still accepts #paeContainer/#paeCanvas, so
+                         the old names looked fine - but the vendored
+                         STYLESHEET has no rule for them at all, and the tab
+                         strip is absolutely positioned. Without
+                         `position: relative` here it escapes to the nearest
+                         positioned ancestor, .py2dmol-viewer-instance, and is
+                         drawn somewhere else on the page; the container also
+                         loses its 340px, its square aspect and its overflow
+                         clip, and the canvas its absolute fill. Accepted by
+                         the code and unstyled by the CSS is exactly the shape
+                         of bug that looks like it works. -->
+                    <div id="heatmapContainer" class="container-box" style="display: none;">
+                        <canvas id="heatmapCanvas" style="cursor: crosshair;"></canvas>
+                    </div>
+
+                    <!-- A BioEmu2 ENSEMBLE'S PCA, on py2Dmol's own scatter plot: one point a
+                         sample, the frame on screen highlighted, a click jumps to it. Hidden
+                         until a fold's frames carry points (showEnsembleScatter in web/app.js). -->
+                    <div id="scatterContainer" class="container-box" style="display: none; position: relative;">
+                        <canvas id="scatterCanvas" style="cursor: pointer;"></canvas>
+                    </div>
+
+                    <!-- THE RAW PREDICTION, under the confidence it describes.
+                         py2Dmol's own Save writes a session - the view, the
+                         selections, what is on screen. These two write what the
+                         MODEL produced: the structure and its scores. Different
+                         things, so they are not the same button, and this is
+                         where a reader looking at pLDDT and PAE already is. -->
+                    <!-- Prediction scores card -->
+                    <div id="predictionScoresBox" class="container-box" style="display: none;">
+                        <!-- 🔴 NO TITLE AND NO BADGE. Every cell here is
+                             labelled, so a heading over them said only that
+                             scores are scores; and the badge named the frame
+                             ("Pass 16", "flow_12"), which the trajectory's own
+                             play bar already says. Both cost the width that
+                             keeps the metrics on one line. -->
+                        <div class="scores-card-grid" id="scoresCardGrid">
+                            <div class="score-metric-cell">
+                                <div class="score-metric-label">pLDDT</div>
+                                <div id="metricMeanPlddt" class="score-metric-value">-</div>
+                            </div>
+                            <div class="score-metric-cell">
+                                <div class="score-metric-label">pTM</div>
+                                <div id="metricPtm" class="score-metric-value">-</div>
+                            </div>
+                            <div id="metricIptmCell" class="score-metric-cell" style="display: none;">
+                                <div class="score-metric-label">ipTM</div>
+                                <div id="metricIptm" class="score-metric-value">-</div>
+                            </div>
+                            <div id="metricMultimerCell" class="score-metric-cell" style="display: none;">
+                                <div class="score-metric-label">Ranking</div>
+                                <div id="metricMultimer" class="score-metric-value">-</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- THE RAW PREDICTION, under the confidence it describes.
+                         py2Dmol's own Save writes a session - the view, the
+                         selections, what is on screen. These two write what the
+                         MODEL produced: the structure and its scores. Different
+                         things, so they are not the same button, and this is
+                         where a reader looking at pLDDT and PAE already is. -->
+                    <div id="downloads" class="container-box" style="display: none;">
+                        <button id="download-pdb" class="btn btn-secondary"
+                            title="Download the predicted structure">
+                            <i class="fa-solid fa-download"></i><span>PDB</span>
+                        </button>
+                        <button id="download-all" class="btn btn-secondary"
+                            title="Download everything this fold used and produced,
+                                   as a zip in the AlphaFold 3 server's layout:
+                                   structure, scores, contacts, the request, and
+                                   one alignment per chain. Drop the zip back on
+                                   the alignment upload box to fold again with
+                                   exactly these alignments.">
+                            <i class="fa-solid fa-download"></i><span>All</span>
+                        </button>
+                        <!-- ...AND THE VIEWER'S SESSION, py2Dmol's own format:
+                             every object, frame, map, colour, selection and
+                             the camera. It opens on py2dmol.solab.org, where
+                             the same button sits in the page's upper-right
+                             corner, and back here through the upload box. No JS
+                             of ours: the vendored bundle wires any
+                             #saveStateButton to saveViewerState. -->
+                        <button id="saveStateButton" class="btn btn-secondary" type="button"
+                            title="Save everything the viewer is showing as a py2Dmol session (.json): every fold, its frames, maps, colours, selections and the camera. Opens on py2dmol.solab.org.">
+                            <i class="fa-solid fa-floppy-disk"></i><span>Session</span>
+                        </button>
+                    </div>
+
+                    <!-- 🔴 THE CONFIDENCE TRACE'S BOX, WHICH IS HALF OF TURNING IT
+                         ON. py2Dmol's panel finds its own DOM and does nothing
+                         at all until this exists - so the call in web/app.js's
+                         revealViewer is inert without it, silently, because a
+                         panel with no container returns null rather than
+                         throwing. The other half is the vendored bundle: the
+                         panel has to BE in it. Both or neither.
+                         Every structure on this page is a prediction, which is
+                         why we ask for a plot py2Dmol's own site does not
+                         offer - there a B-factor column would be titled pLDDT. -->
+                    <div id="plddtContainer" class="container-box" style="display: none;"></div>
+
+                    <!-- Scatter Plot Container (mirrors main viewer sizing; JS sets dimensions) -->
+                    <div id="scatterContainer" class="container-box" style="display: none; position: relative;">
+                        <canvas id="scatterCanvas" style="cursor: pointer;"></canvas>
+                        <div class="resize-handle" aria-label="Resize scatter plot"></div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+      <!-- py2Dmol queries these on load. Hidden: this page has no upload or
+           fetch-by-id, and a visible control that does nothing is worse than
+           no control. `#status` is py2Dmol's own - it writes "Ready. Upload a
+           file or fetch an ID." into it, which is why this page's line is
+           `#screen-status`: sharing the id let the vendor overwrite the
+           screen's own status on load. -->
+      <div hidden>
+        <div id="status"><div id="status-message"></div></div>
+        <input type="file" id="file-upload">
+        <button id="upload-button" type="button"></button>
+        <input type="text" id="fetch-id">
+        <input type="text" id="fetch-uniprot-id">
+        <button id="fetch-btn" type="button"></button>
+        <div id="global-drop-overlay"></div>
+        <div id="sequence-viewer-container"></div>
+        <div id="msa-viewer-container"></div>
+        <div id="msa-buttons"></div>
+      </div>
+      <div class="row" style="margin-top:0.5rem">
+        <label for="colour-by">Colour by</label>
+        <select id="colour-by">
+          <option value="affinity_probability_binary" selected>Binding probability (higher is better)</option>
+          <option value="affinity_pred_value">pIC50 / IC50-like value (lower value is better)</option>
+          <option value="iptm">Interface ipTM (confidence)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <label>Ranked</label>
+        <span class="note">
+          <!-- 🔴 BOTH OUTPUTS, LABELLED, NEVER MERGED. The two heads are
+               trained on different data with different supervision. -->
+          prob = is it a binder at all (classifier, higher better) &middot;
+          pIC50 = an IC50-<em>like</em> strength for <strong>ranking</strong>
+          (higher better) &mdash; trained on mixed K<sub>i</sub>/K<sub>d</sub>/IC50
+          assays, so not a quotable potency
+        </span>
+      </div>
+      <svg id="scatter" viewBox="0 0 440 240" width="100%" height="240"
+        role="img" aria-label="binding probability against pIC50"></svg>
+      <div class="scroll">
+        <table id="table">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="note" id="caveats"></p>
+    </div>
+  </div>
+
+  <p class="note">
+    Folds locally on WebGPU. The affinity module is a second checkpoint and a
+    second forward pass; its two outputs come from heads trained on different
+    data and are not interchangeable.
+  </p>
+
+  <!-- 🔴 THE CREDITS THE FOLD PAGE CARRIES AND THIS ONE DID NOT. index.html
+       credits LocalFold, py2Dmol, ColabFold and the model authors; this page
+       loads py2Dmol's own bundle and uses ColabFold's MMseqs2 server, and had
+       one line about Boltz-2's licence. -->
+  <p class="note">
+    Built on <a href="https://github.com/sokrypton/localfold">LocalFold</a>
+    (Beerware, Sergey Ovchinnikov) — this page and the Boltz-2 affinity path
+    are additions to it. Structure and affinity weights are
+    <a href="https://huggingface.co/boltz-community/boltz-2">boltz-community/boltz-2</a>,
+    <strong>MIT</strong>; the affinity method is reverse-engineered from
+    <a href="https://github.com/jwohlwend/boltz">jwohlwend/boltz</a> (MIT), whose
+    code is read rather than vendored. The viewer is
+    <a href="https://github.com/sokrypton/py2Dmol">py2Dmol</a>. Alignment
+    searches, when you ask for one, run against the public
+    <a href="https://github.com/sokrypton/ColabFold">ColabFold</a> MMseqs2
+    server — please cite Mirdita et al., <em>Nature Methods</em> 19, 679–682
+    (2022). No AlphaFold&nbsp;3 parameters are used or redistributed by this
+    page.
+  </p>
+
+  <script src="./web/vendor/py2Dmol.align.js"></script>
+  <script src="./web/vendor/py2Dmol.full.min.js"></script>
+  <script type="module" src="./web/screen.js"></script>
+</body>
+
+</html>

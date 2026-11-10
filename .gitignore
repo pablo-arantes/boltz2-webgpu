@@ -172,3 +172,12 @@ model-rfd4p-int8/*.safetensors
 model-rfd4p-int8/shards/
 # metal/rfd4p/gate.py's reference trajectories: a CPU forward per arm, gigabytes, rebuilt on demand
 /.rfd4p-gate/
+/model-boltz2-affinity-f32
+/model-boltz2-affinity-int5
+
+# 🔴 UPSTREAM ASSETS, FETCHED NOT COMMITTED. tools/fetch_boltz_cache.sh and
+# tools/fetch_boltz2_bundle.sh put Boltz-2's 6.1 GB of checkpoints, its venv
+# and the G8 comparison outputs here. Nothing in refs/ is ours to redistribute
+# and none of it is needed to run the page - only to re-run the upstream
+# comparisons in spec/G8-RESULT.md.
+/refs

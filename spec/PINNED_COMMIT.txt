@@ -1,0 +1,23 @@
+LocalFold pinned revision for this project
+==========================================
+repo:   https://github.com/sokrypton/localfold
+SHA:    357518613af612b4e1e887deecd93bd612fdac76
+date:   Mon Nov 9 09:15:11 2026 -0500
+subject: WebGL2 AF3: boltz2's and rf3's outer product mean bias, Protenix/Mol-1
+         with an alignment - the input-kind matrix
+cloned:  2026-11-09 into refs/localfold
+
+Phase 2 pins
+============
+upstream:  https://github.com/jwohlwend/boltz
+SHA:       b1ebfc46ecf57f5414e0d1a6f9027bbb122c53bc  (v2.2.1-6-gb1ebfc4)
+date:      Fri May 29 09:20:25 2026 +0100
+
+weights:   https://huggingface.co/boltz-community/boltz-2
+repo sha:  6fdef46d763fee7fbb83ca5501ccceff43b85607
+licence:   MIT
+  boltz2_conf.ckpt  2,286,561,469 B   (structure; LocalFold's bundle derives from this)
+  boltz2_aff.ckpt   2,062,139,170 B   (affinity; 98.3% redundant with the above)
+  mols.tar                            (CCD assets - NOT needed, SMILES-only scope)
+
+verified 2026-11-09: check_remote_bundle.py boltz2 -> all 24 shards, 365 MiB

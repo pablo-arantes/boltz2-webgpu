@@ -11,9 +11,9 @@ it is organised by the question a tool answers and says which arms are traps,
 which is what you want when you know what you are asking. Come here when you
 do not know whether a tool already exists.
 
-489 tools. `tools/fixtures/` is data and is not listed.
+494 tools. `tools/fixtures/` is data and is not listed.
 
-## `tools/gpu/` - the WebGPU lane (291)
+## `tools/gpu/` - the WebGPU lane (295)
 
 Each exports `async function main(device, args)` and is run as
 `node tools/gpu-chrome.mjs tools/gpu/<module>.js [--flags]`.
@@ -89,6 +89,7 @@ Each exports `async function main(device, args)` and is run as
 - **`check-af3-triangle.js`** - AF3 triangle multiplication: GPU against cpu/af3/trunk/pairformer.js.
 - **`check-af3-trunk.js`** - AF3's whole trunk on the GPU, against cpu/af3/trunk/trunk.js.
 - **`check-af3-webgl-page.js`** - The page's fold (web/af3-model.js `foldAf3`) on its WebGL2 backend against its WebGPU one: the same sequence, seed and schedule through `backend: "webgl2"` and through `foldBatch`, compared on what a refold reports - Cα RMSD between the two structures, mean pLDDT, pTM, ipTM and per-chain pTM - with the local bundle (no download).
+- **`check-affinity-memory.js`** - G7: does the screening loop leak GPU memory across ligands?
 - **`check-attention-packing.js`** - What does packing the attention KEY cost, and what does packing the VALUE?
 - **`check-attention-project-matrix.js`** - Does AF2's matrix q/k/v/gate projection compute the vector one's answer?
 - **`check-attention-variants.js`** - Every flash-attention variant against the same input, on this device.
@@ -191,7 +192,10 @@ Each exports `async function main(device, args)` and is run as
 - **`check-webgl-transition.js`** - The transition in WebGL2 against the WGSL one and a CPU reference.
 - **`check-webgl-triangle.js`** - Triangle multiplication in WebGL2 against the CPU reference AND against the WGSL kernel, in one page - the first whole AlphaFold operation in this backend.
 - **`clash-geometry.js`** - Do a fold's atoms overlap each other? The question bonds cannot answer.
+- **`dump-affinity-inputs.js`** - This port's own `s_inputs` and `z` entering the affinity module, written out for comparison against upstream's.
 - **`dump-bioemu2-stages.js`** - webgpu/bioemu2's stages, handed back as one base64 blob for tools/dump-bioemu2-webgpu.mjs to write as a cuda/featurise input directory - the oracle metal/bioemu2 reads with --oracle=.
+- **`dump-embed-weights.js`** - Two token-embedding weights, decoded off the shipped bundle.
+- **`dump-ref-conformer.js`** - This port's reference conformer for the ligand, in its own dense-24 layout.
 - **`fold-af2-webgl.js`** - Fold AlphaFold 2's monomer in WebGL2, from a real weight bundle, beside the WGSL fold of the same weights.
 - **`fold-af2.js`** - An AlphaFold 2 monomer fold, end to end, so a kernel change can be compared against the tree before it.
 - **`fold-af3-webgl.js`** - Fold AlphaFold 3 in WebGL2, from a real weight bundle.
@@ -402,7 +406,7 @@ and turning it into a bundle.
 - **`safetensors_read.py`** - Read a .safetensors file into numpy arrays, without the safetensors package.
 - **`vector-quantise.py`** - Is a codebook worth a new decoder? Scalar codes against vector ones, at 2 bits.
 
-## `tools/` - everything else (118)
+## `tools/` - everything else (119)
 
 CPU checkers, the export and quantisation pipeline, the page drivers that
 go through CDP, and the deploy.
@@ -519,6 +523,7 @@ go through CDP, and the deploy.
 - **`safari-run.html`** - run
 - **`score-bioemu2-samples.mjs`** - BioEmu2 samples, scored as BioEmu2 scores them: its physicality report and its steering potentials' energies.
 - **`score_fold.py`** - Score a fold from tools/gpu/fold.js against a reference structure.
+- **`screen-in-page.py`** - Does the SCREEN PAGE work - the controls a reader touches, not the API?
 - **`serve.py`** - Serve the checkout with caching turned off.
 - **`sync-py2dmol.py`** - Mirror py2Dmol's built bundles from its own checkout into this one.
 - **`toy-oracle.html`** - toy oracle: AF2-multimer vs LocalFold

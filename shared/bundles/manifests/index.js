@@ -408,6 +408,39 @@ export const MODEL_BUNDLES = {
     companion: "esmc-300m",
     load: () => import("./ef2-fast-300m.js"),
   },
+  // 🔴 BOLTZ-2'S AFFINITY MODULES ARE A SECOND CHECKPOINT AND A SECOND FORWARD
+  // PASS, so they are a bundle of their own rather than 6 MiB added to the
+  // structure bundle every fold pays for. boltz2_aff.ckpt shares 5,019 tensors
+  // with boltz2_conf.ckpt BYTE FOR BYTE - established by tools/g0_verify.py
+  // over all of them, not sampled - so the trunk is NOT re-exported here and
+  // this bundle is only the 520 tensors that are the affinity module's own:
+  // two ensemble members, each a pair-only pairformer, a pairwise conditioner
+  // and three MLP heads. 6.5 MiB in eight shards against the 365 MiB structure
+  // bundle.
+  //
+  // 🔴 AND IT IS FETCHED WHEN A READER ASKS FOR AN AFFINITY, NOT ON LOAD. That
+  // is the whole reason it is in this registry: `openStore("boltz2-affinity")`
+  // gets the pinned remote, the CacheStorage shard cache and the download dial
+  // with no new code, exactly as ESM-C does for the PLM towers.
+  //
+  // 🔴 `remote: null` MEANS THIS BUNDLE IS NOT PUBLISHED YET, AND THE SITE
+  // BUILD KNOWS. docs/ records what happens when a page offers a family whose
+  // remote is null: `bundleBaseUrl` falls back to `directory`, a local export
+  // the build deliberately never copies, and the option is broken the moment
+  // it ships. build_site.py drops an unservable option for exactly this
+  // reason. Publishing the export and pinning its revision here is the only
+  // change needed - the registry decides.
+  "boltz2-affinity": {
+    model: "boltz2-affinity",
+    directory: "./model-boltz2-affinity-int5/",
+    remote: null,
+    release: "boltz2-affinity-int5",
+    variable: "LOCALFOLD_INCLUDE_BOLTZ2_AFFINITY",
+    companion: undefined,
+    // not a structure predictor: it scores a pose it is given
+    foldingModel: false,
+    load: () => import("./boltz2-affinity.js"),
+  },
   // 🔴 NOT A MODEL A PAGE OFFERS, AND THAT IS WHY IT IS NOT IN MODEL_FAMILIES.
   // ESM-C folds nothing on its own; it exists here so the loader, the shard
   // cache, the download dial and build_site.py can all treat it as a bundle.

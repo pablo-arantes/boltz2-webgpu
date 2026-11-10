@@ -203,8 +203,24 @@ export function embed(input, weights) {
   if (weights.tokenBondsTypeEmbed !== undefined) {
     const orders = input.bondOrderMatrix;
     for (let index = 0; index < pairs; index += 1) {
+      // 🔴 THE CODE IS SHIFTED BY ONE, AND ZERO MEANS "NOT BONDED". Upstream's
+      // tokeniser writes `bond["type"] + 1` into the plane
+      // (`boltz/data/tokenize/boltz2.py:368`) and leaves every unbonded pair at
+      // 0, which is why the embedding has SEVEN rows for the six names in
+      // `const.py`'s `bond_types`. This port wrote the unshifted code, so every
+      // bonded pair read the row one too early - a single bond took the OTHER
+      // row and an aromatic bond the TRIPLE row.
+      //
+      // 🔴 AND THE SHIFT IS CONDITIONAL ON THE ADJACENCY, NOT UNCONDITIONAL:
+      // adding one everywhere would move unbonded pairs off row 0, and the
+      // order plane cannot tell "no bond" from an OTHER bond (both 0) on its
+      // own. Measured on G8's job: `z_init` was 10.7x the int5 floor on exactly
+      // the 20 bonded pairs, carrying 38% of its residual energy, with the
+      // adjacency set already identical to upstream's - see spec/G8-RESULT.md.
+      const bonded = input.bondMatrix !== undefined && input.bondMatrix[index] !== 0;
       const order = orders === undefined ? 0 : (orders[index] | 0);
-      const row = (order >= 0 && order < 7 ? order : 0) * pairChannels;
+      const code = bonded ? order + 1 : 0;
+      const row = (code >= 0 && code < 7 ? code : 0) * pairChannels;
       for (let c = 0; c < pairChannels; c += 1) {
         pair[index * pairChannels + c] += weights.tokenBondsTypeEmbed[row + c]
           + weights.contactEncodingUnspecified[c];

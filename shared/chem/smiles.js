@@ -220,6 +220,13 @@ export function parseSmiles(text) {
         : (isDirection(here) ? oppositeOf(here) : null);
       addBond(open.atom, previous, order, direction, true);
       const created = bonds.length - 1;
+      // 🔴 THE DIGIT IS KEPT BECAUSE IT DECIDES THE NEIGHBOUR ORDER. RDKit
+      // defers every closure to `CloseMolRings`, which walks the bond
+      // bookmarks in a map keyed by the ring digit - so two closures written
+      // on ONE atom end up in digit order, not in the order they were written.
+      // `c61` closing rings 6 and 1 lists ring 1's partner first. Only
+      // `canon-input.js` reads this.
+      bonds[created].ringLabel = Number(label);
       const at = writtenNeighbours[open.atom].indexOf(open.slot);
       if (at >= 0) writtenNeighbours[open.atom][at] = created;
       writtenNeighbours[previous].push(created);

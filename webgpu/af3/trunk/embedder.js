@@ -377,7 +377,7 @@ ${pairPerThread > 0 ? `${overPairThread((b) => `  var recycled_${b} = 0.0;`)}
 ${overPairThread((b) => `    recycled_${b} += nk * weights[w_row + ${b * 64}u];`)}
   }
   let bond_val = bonds[row];
-  ${offsets.tokenBondsTypeEmbed === undefined ? "" : "let bond_type_row = W_BOND_TYPE + u32(clamp(i32(bonds[PAIRS + row]), 0, 6)) * C_Z;"}
+  ${offsets.tokenBondsTypeEmbed === undefined ? "" : "let bond_code = select(0i, i32(bonds[PAIRS + row]) + 1i, bond_val != 0.0);\n  let bond_type_row = W_BOND_TYPE + u32(clamp(bond_code, 0, 6)) * C_Z;"}
 ${overPairThread((b) => `  {
     let c = local + ${b * 64}u;
     let relative_total = weights[row_a + c] + weights[row_b + c]

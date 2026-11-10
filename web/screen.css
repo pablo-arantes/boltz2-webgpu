@@ -1,0 +1,82 @@
+/*
+ * The screen page's own stylesheet.
+ *
+ * Deliberately small and self-contained: the same visual language as the fold
+ * page (gray-50 ground, white cards, 0.5rem radius, one blue accent) written
+ * out rather than inherited, because localfold.css is the FOLD page's layout
+ * and coupling a second page to it makes every change to one a risk to the
+ * other. No Tailwind - the fold page's own header records why.
+ */
+:root {
+  --ground: #f9fafb;
+  --card: #ffffff;
+  --line: #e5e7eb;
+  --ink: #1f2937;
+  --muted: #6b7280;
+  --accent: #2563eb;
+  --warn: #b45309;
+  --bad: #b91c1c;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 1rem; background: var(--ground); color: var(--ink);
+  font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+h1 { font-size: 1.25rem; margin: 0; font-weight: 700; }
+h1 span { color: var(--muted); font-weight: 400; font-size: 0.95rem; }
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: 0.5rem;
+  padding: 0.75rem; margin-bottom: 0.75rem;
+}
+.row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.row > label { color: var(--muted); font-size: 0.8rem; text-transform: uppercase;
+  letter-spacing: 0.03em; }
+.grow { flex: 1 1 auto; min-width: 0; }
+header.row { margin-bottom: 0.75rem; }
+button {
+  font: inherit; padding: 0.4rem 0.9rem; border-radius: 0.375rem;
+  border: 1px solid var(--line); background: var(--card); cursor: pointer;
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: 0.5; cursor: default; }
+input, select, textarea {
+  font: inherit; padding: 0.35rem 0.5rem; border: 1px solid var(--line);
+  border-radius: 0.375rem; background: var(--card); color: var(--ink);
+}
+textarea { width: 100%; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px; resize: vertical; }
+input[type="number"] { width: 5rem; }
+#status {
+  background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af;
+  border-radius: 0.5rem; padding: 0.5rem 0.75rem; margin-bottom: 0.75rem;
+}
+#status.bad { background: #fef2f2; border-color: #fecaca; color: var(--bad); }
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+@media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+#viewer { height: 420px; border-radius: 0.375rem; overflow: hidden;
+  background: #fff; position: relative; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 0.25rem 0.4rem; border-bottom: 1px solid var(--line);
+  white-space: nowrap; }
+th:first-child, td:first-child, th.left, td.left { text-align: left; }
+th { cursor: pointer; user-select: none; color: var(--muted); font-weight: 600;
+  font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
+th.sorted { color: var(--accent); }
+td.smiles { font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+  max-width: 14rem; overflow: hidden; text-overflow: ellipsis; }
+tr.refused td, tr.failed td { color: var(--bad); }
+tr.skipped td { color: var(--muted); }
+.swatch { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 2px;
+  vertical-align: -1px; margin-right: 0.35rem; }
+.scroll { max-height: 340px; overflow: auto; }
+.note { color: var(--muted); font-size: 0.8rem; }
+.warn { color: var(--warn); }
+#queue { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+#queue span {
+  font-size: 11px; padding: 0.1rem 0.35rem; border-radius: 0.25rem;
+  border: 1px solid var(--line); font-family: ui-monospace, Menlo, monospace;
+}
+#queue span.running { border-color: var(--accent); color: var(--accent); }
+#queue span.done { background: #f0fdf4; border-color: #bbf7d0; }
+#queue span.failed, #queue span.refused { background: #fef2f2; border-color: #fecaca;
+  color: var(--bad); }

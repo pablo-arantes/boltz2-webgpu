@@ -1,0 +1,8 @@
+LocalFold pinned revision for this project
+==========================================
+repo:   https://github.com/sokrypton/localfold
+SHA:    357518613af612b4e1e887deecd93bd612fdac76
+date:   Mon Nov 9 09:15:11 2026 -0500
+subject: WebGL2 AF3: boltz2's and rf3's outer product mean bias, Protenix/Mol-1
+         with an alignment - the input-kind matrix
+cloned:  2026-11-09 into refs/localfold

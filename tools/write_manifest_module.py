@@ -161,6 +161,27 @@ BUNDLES = {
         "module": "shared/bundles/manifests/boltz2.js",
         "model": "boltz2",
     },
+    # Boltz-2's AFFINITY modules, which are a SECOND CHECKPOINT and not part of
+    # the bundle above. boltz2_aff.ckpt shares 5,019 tensors with boltz2_conf
+    # byte for byte (tools/g0_verify.py) and carries 520 of its own: two
+    # ensemble members, each a pair-only pairformer, a pairwise conditioner and
+    # three MLP heads. 6.5 MiB in eight shards at int5 group 32, against the
+    # 365 MiB structure bundle - which is why it is a separate bundle fetched
+    # only when a reader asks for an affinity, rather than 6 MiB added to every
+    # fold.
+    #
+    # 🔴 ITS NAMES ARE upstream's PyTORCH NAMES, DOT SEPARATED, and that is why
+    # the manifest's own float32Tensors list is load bearing:
+    # quantize_af3.py's KEEP_FLOAT32 regex is SLASH separated (Haiku paths) and
+    # matches NONE of them, so without the list every LayerNorm scale in this
+    # bundle would be quantised to int5. npm run test:affinity-quant is the
+    # gate, and its --falsify arm empties the list and requires the norms to
+    # degrade.
+    "boltz2-affinity": {
+        "export": "model-boltz2-affinity-int5",
+        "module": "shared/bundles/manifests/boltz2-affinity.js",
+        "model": "boltz2-affinity",
+    },
     # Protenix-v2, whole, at int5 group 32. 334 MiB in eight shards.
     #
     # 🔴 ITS SAMPLER HAS A ONE-ANGSTROM SEED SPREAD ON 6MRR - 0.607 to 1.642 A

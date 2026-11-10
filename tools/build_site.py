@@ -50,7 +50,14 @@ FILES = [".nojekyll", "index.html", "dev.html"]
 # ...and `design.html`, which IS in the repository and is copied when present:
 # nothing links to it and index.html does not mention it, but it is on the site
 # once `main` deploys. Unlinked is not hidden; see docs/DESIGN.md.
-OPTIONAL = ["single.html", "proteinhunter.html", "design.html"]
+# 🔴 AND `screen.html` IS OPTIONAL FOR ONE REASON WORTH STATING: its affinity
+# bundle has no `remote:` yet. MODEL_BUNDLES["boltz2-affinity"] points at a
+# local export, and this script's own rule for that case - the one that drops an
+# unservable `<option>` from the model picker - is why an unpublished bundle
+# must not become a published page that 404s. Copied when present so a local
+# build has the page; publish the bundle, pin its revision, and it is a site
+# page with no further change here.
+OPTIONAL = ["single.html", "proteinhunter.html", "design.html", "screen.html"]
 # 🔴 AND `webgl` IS ON THIS LIST BECAUSE web/af3-model.js IMPORTS IT STATICALLY. Without it this
 # script assembles a dist/ whose web/af3-model.js resolves to nothing - the module never loads and
 # the AF3 fold path is dead for every visitor, WebGPU or not - and the only gate that can see it is
@@ -261,6 +268,29 @@ def unreachable_offers() -> list[str]:
     # An <option> that is not a model family at all - a sampler, a preset - is
     # not this check's business.
     return sorted(family for family in offered & known if family not in hosted)
+
+
+# 🔴 A PAGE IS AS UNSERVABLE AS AN `<option>`, AND NOTHING SAID SO EITHER.
+# `screen.html` opens `boltz2-affinity` through `openStore`, and that bundle's
+# `remote` is null - so `bundleBaseUrl` falls back to
+# `./model-boltz2-affinity-int5/`, a local export this build deliberately never
+# copies, and the page 404s on shard zero for every visitor. It is the same
+# defect `unreachable_offers` exists for, one control further out: not an option
+# inside a picker but a whole page, which no `<option>` scan can see.
+#
+# The build's own header has claimed since the page was written that
+# `screen.html` is optional "for one reason worth stating: its affinity bundle
+# has no `remote:` yet" - but `OPTIONAL` only ever meant "copy it if the source
+# is there", so the page shipped anyway. A stated intention that nothing
+# enforces is not a safeguard.
+PAGE_BUNDLES = {"screen.html": "boltz2-affinity"}
+
+
+def unservable_pages() -> list[tuple[str, str]]:
+    """Pages whose required bundle no visitor can fetch."""
+    hosted = remote_families()
+    return sorted((page, family) for page, family in PAGE_BUNDLES.items()
+                  if family not in hosted)
 
 
 def unreachable_model_numbers() -> list[str]:
@@ -668,6 +698,33 @@ def build(include_model: bool, local_bundles: bool = True) -> int:
               " directory this build does not publish.")
         print("  Publish the bundle and re-pin the remote (docs/HOSTING.md) and the"
               " option returns by itself.")
+
+    # ...and the same for a whole PAGE whose bundle is unpublished, which is
+    # invisible to an `<option>` scan because it is not in a picker at all.
+    #
+    # 🔴 IT IS DROPPED FROM `dist/`, NEVER FROM THE CHECKOUT - the page is
+    # exactly what a developer with the local export wants, and it is how the
+    # bundle gets published in the first place.
+    pages = unservable_pages()
+    for page, family in pages:
+        target = OUT / page
+        if target.exists():
+            target.unlink()
+        # a link left behind is the same bug one step quieter
+        for html in sorted(OUT.glob("*.html")):
+            text = html.read_text(encoding="utf-8")
+            if page in text:
+                print(f"{html.name} still links {page}", file=sys.stderr)
+                return 1
+    if pages:
+        print(f"dropped {len(pages)} page(s) the site cannot serve:"
+              f" {', '.join(page for page, _ in pages)}")
+        for page, family in pages:
+            print(f"  {page} opens the `{family}` bundle, whose `remote` is null,"
+                  f" so it would 404 on shard zero for every visitor.")
+        print("  Publish the bundle and pin its revision in"
+              " shared/bundles/manifests/index.js (docs/HOSTING.md) and the page"
+              " returns by itself.")
 
     # ...and the same for AlphaFold 2's model NUMBER, which is a control rather
     # than a family list and so invisible to the check above.

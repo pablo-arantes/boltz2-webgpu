@@ -1,8 +1,19 @@
-name: Deploy WebGPU demo
-
+# GitHub Pages deploy for the screening page.
+#
+# 🔴 THE `push` TRIGGER IS DELIBERATELY ABSENT UNTIL THE AFFINITY BUNDLE IS
+# PUBLISHED. `screen.html` opens the `boltz2-affinity` bundle, whose `remote` is
+# null in shared/bundles/manifests/index.js, and tools/build_site.py drops the
+# page rather than ship one that 404s on shard zero for every visitor. Deploying
+# now would put up a site with no screening page - the deliverable missing - so
+# the workflow runs only when asked, and the job below REFUSES rather than
+# deploying a site in that state. Add
+#
+#   push:
+#     branches: [main]
+#
+# in the same commit that pins the bundle's revision.
+name: Pages
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -10,109 +21,72 @@ permissions:
   pages: write
   id-token: write
 
+# one deploy at a time; never cancel a running one midway
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
 
-      # No node, no npm, no install step: the page loads shared/, cpu/ and webgpu/**/*.js as written,
-      # so assembling the site is a copy with an allow-list. python3 is already
-      # on the runner.
-      - name: Assemble the site
+      # 🔴 THE GATES RUN BEFORE THE BUILD, because a site that builds is not the
+      # same as a site that is right. `npm test` is the CPU suite; test:sizes
+      # fails on an undeclared tracked file over 10 MiB or ANY file that large
+      # reaching dist/, which is the publishing brief's own rule.
+      - run: npm test
+      - run: npm run test:sizes
+      - run: npm run test:canonical-rank
+      - run: npm run test:canonical-names
+
+      - name: Build the site
         run: python3 tools/build_site.py
 
-      # GitHub Pages is public even when its source repository is private, so
-      # the parameters ship only when the repository variable says so.
-      - name: Add the single model-1 PTM release bundle
-        if: ${{ vars.LOCALFOLD_INCLUDE_MODEL == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # 🔴 REFUSE TO PUBLISH A SITE WITHOUT ITS DELIVERABLE. build_site.py drops
+      # an unservable page and says so; this turns that into a failure, so the
+      # only way to a green deploy is a published bundle with its revision
+      # pinned. A site missing the screening page is the failure this whole
+      # workflow exists to avoid shipping quietly.
+      - name: Refuse a site with no screening page
         run: |
-          # 🔴 THE REGISTRY DECIDES, NOT THIS FILE. A bundle with a `remote`
-          # in shared/bundles/manifests/index.js is fetched by the browser from
-          # there, so publishing a copy here would spend the Pages allowance on
-          # bytes nothing loads. Asking build_site.py keeps one answer.
-          if python3 tools/build_site.py --is-remote monomer; then
-            echo "monomer is hosted remotely; not publishing it"
-            exit 0
+          if [ ! -f dist/screen.html ]; then
+            echo "::error::dist/ has no screen.html - the boltz2-affinity bundle"
+            echo "::error::has no \`remote\` in shared/bundles/manifests/index.js, so"
+            echo "::error::build_site.py dropped the page rather than ship a 404."
+            echo "::error::Publish model-boltz2-affinity-int5/ and pin its revision."
+            exit 1
           fi
-          gh release download model1-ptm --pattern localfold-model1-ptm.tar.gz
-          tar -xzf localfold-model1-ptm.tar.gz -C dist
+          echo "screen.html is present; the affinity bundle is servable."
 
-      # 🔴 A SEPARATE BUNDLE AND A SEPARATE SWITCH. Multimer is another 98 MiB
-      # on top of the monomer's 97, and the page loads whichever the fold asks
-      # for, so a site can carry one, both, or neither. Without this the model
-      # dropdown still offers Multimer - and Auto selects it for any sequence
-      # with a ':' - which then fails on a manifest that was never deployed.
-      - name: Add the multimer model-1 release bundle
-        if: ${{ vars.LOCALFOLD_INCLUDE_MULTIMER_MODEL == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # 🔴 NO BASE-PATH REWRITING IS NEEDED AND THAT IS CHECKED, NOT ASSUMED. A
+      # project page is served from /<repo>/, so a single root-absolute asset,
+      # worker, wasm or manifest reference would 404. dist/ is entirely
+      # relative; this fails if that ever stops being true.
+      - name: Refuse root-absolute references
         run: |
-          # 🔴 THE REGISTRY DECIDES, NOT THIS FILE. A bundle with a `remote`
-          # in shared/bundles/manifests/index.js is fetched by the browser from
-          # there, so publishing a copy here would spend the Pages allowance on
-          # bytes nothing loads. Asking build_site.py keeps one answer.
-          if python3 tools/build_site.py --is-remote multimer; then
-            echo "multimer is hosted remotely; not publishing it"
-            exit 0
+          if grep -rnoE '(src|href)="/[^/"]|import\("/|from "/|fetch\("/|new Worker\("/' \
+               dist --include='*.html' --include='*.js'; then
+            echo "::error::dist/ contains root-absolute references; they 404 under /<repo>/."
+            exit 1
           fi
-          gh release download model1-multimer-v3 --pattern localfold-model1-multimer-v3.tar.gz
-          tar -xzf localfold-model1-multimer-v3.tar.gz -C dist
-
-      # 🔴 A RESTRICTED BUNDLE, AND THE ONLY ONE SO FAR. model-af3-int5 holds
-      # DeepMind's AF3 parameters, not OpenFold3's - they carry a Prohibited Use
-      # Policy and terms that forbid redistribution, so publishing them is a
-      # deliberate act by whoever runs this deployment. It takes BOTH repository
-      # variables: one to include the bundle, one naming the terms accepted.
-      #
-      # 🔴 AND THAT SECOND VARIABLE EXISTS BECAUSE THIS STEP BYPASSES THE GATE
-      # IN build_site.py. That gate reads what a bundle's manifest SAYS IT IS
-      # and refuses to copy restricted weights without an explicit acceptance -
-      # but it only guards `--model` builds, and this job assembles the site
-      # without weights and then untars them in afterwards. Without the check
-      # below, the one path that actually publishes is the one path with no
-      # gate on it.
-      - name: Add the AlphaFold 3 int5 bundle
-        if: ${{ vars.LOCALFOLD_INCLUDE_AF3_MODEL == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ACCEPTED: ${{ vars.LOCALFOLD_ACCEPT_MODEL_TERMS }}
-        run: |
-          case ",$ACCEPTED," in
-            *,alphafold3,*) ;;
-            *) echo "::error::model-af3-int5 holds DeepMind's AF3 parameters,"                     "which carry the AF3 Weights Terms of Use and Prohibited"                     "Use Policy. Set the repository variable"                     "LOCALFOLD_ACCEPT_MODEL_TERMS to include alphafold3 to"                     "confirm the licence covers this deployment."
-               exit 1 ;;
-          esac
-          # 🔴 THE REGISTRY DECIDES, NOT THIS FILE. A bundle with a `remote`
-          # in shared/bundles/manifests/index.js is fetched by the browser from
-          # there, so publishing a copy here would spend the Pages allowance on
-          # bytes nothing loads. Asking build_site.py keeps one answer.
-          if python3 tools/build_site.py --is-remote af3; then
-            echo "af3 is hosted remotely; not publishing it"
-            exit 0
-          fi
-          gh release download af3-int5 --pattern localfold-af3-int5.tar.gz
-          tar -xzf localfold-af3-int5.tar.gz -C dist
+          echo "every reference in dist/ is relative - safe for a project page."
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
-          include-hidden-files: true
 
   deploy:
+    needs: build
+    runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
     steps:
-      - name: Deploy
-        id: deployment
+      - id: deployment
         uses: actions/deploy-pages@v4

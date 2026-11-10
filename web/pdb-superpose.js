@@ -57,12 +57,26 @@ function topEigenvector(a) {
   return [v[0][best], v[1][best], v[2][best], v[3][best]];
 }
 
-/** `text`'s atoms moved onto `reference`'s (the same atoms, in the same order). */
-export function superposePdbOnto(text, reference) {
-  const lines = text.split("\n");
-  const moving = coordinates(lines);
-  const fixed = coordinates(reference.split("\n"));
-  if (moving.length < 3 || moving.length !== fixed.length) return text;
+/**
+ * The rigid move that takes `moving` onto `fixed`, as a rotation about each
+ * one's own centroid.
+ *
+ * 🔴 EXTRACTED RATHER THAN COPIED, because a screen needs the SAME arithmetic
+ * fitted on a SUBSET. superposePdbOnto below fits on every atom in order,
+ * which is right for two writings of one structure and useless across a
+ * screen's ligands: run 2 has a different number of atoms, so the whole fit
+ * declines and every ligand is drawn in its own frame. The brief asks for
+ * "Kabsch alignment on target CA atoms", which is this fit over a chosen
+ * subset and the transform applied to everything - and a second implementation
+ * of Horn's closed form is the last thing this repository needs.
+ *
+ * @param {number[][]} moving
+ * @param {number[][]} fixed the same number of points, paired index for index
+ * @returns {{apply: (point: number[]) => number[]} | null} null when the fit
+ *   is not determined (fewer than 3 points, or unequal counts)
+ */
+export function fitTransform(moving, fixed) {
+  if (moving.length < 3 || moving.length !== fixed.length) return null;
   const centre = (points) => points.reduce((sum, p) => sum.map((value, k) => value + p[k] / points.length), [0, 0, 0]);
   const cm = centre(moving);
   const cf = centre(fixed);
@@ -84,12 +98,56 @@ export function superposePdbOnto(text, reference) {
     [2 * (x * y + w * z), w * w - x * x + y * y - z * z, 2 * (y * z - w * x)],
     [2 * (x * z - w * y), 2 * (y * z + w * x), w * w - x * x - y * y + z * z],
   ];
+  return {
+    apply: (point) => {
+      const p = point.map((value, k) => value - cm[k]);
+      return r.map((row, k) => row[0] * p[0] + row[1] * p[1] + row[2] * p[2] + cf[k]);
+    },
+  };
+}
+
+/**
+ * py2Dmol's `superpose` signature, over this file's own arithmetic.
+ *
+ * 🔴 THE SUBSET FITS AND EVERYTHING MOVES. `pairs.from` indexes `points` and
+ * `pairs.to` indexes `reference`; the transform derived from those pairs alone
+ * is applied to every point handed in. shared/heads/superpose-pdb.js takes
+ * this function as an argument precisely so the fit set can be chosen by the
+ * caller - a screen fits on the target's alpha carbons, which are the atoms
+ * that do not change from ligand to ligand, and moves the ligand with them.
+ *
+ * 🔴 AND IT RETURNS THE POINTS UNMOVED WHERE THE FIT IS NOT DETERMINED, which
+ * is what py2Dmol does and what superposePdb's `on: "none"` reports. Returning
+ * an identity-transformed copy would be the same bytes; returning a plausible
+ * fit from two points would not.
+ *
+ * @param {number[][]} points
+ * @param {number[][]} reference
+ * @param {{from?: number[], to?: number[]}} [pairs] defaults to all of both,
+ *   index for index, which is superposePdbOnto's own fit
+ * @returns {number[][]} every point in `points`, moved
+ */
+export function superposePoints(points, reference, pairs = {}) {
+  const from = pairs.from ?? points.map((_, index) => index);
+  const to = pairs.to ?? reference.map((_, index) => index);
+  const fit = fitTransform(from.map((index) => points[index]),
+                           to.map((index) => reference[index]));
+  if (fit === null) return points;
+  return points.map((point) => fit.apply(point));
+}
+
+/** `text`'s atoms moved onto `reference`'s (the same atoms, in the same order). */
+export function superposePdbOnto(text, reference) {
+  const lines = text.split("\n");
+  const moving = coordinates(lines);
+  const fixed = coordinates(reference.split("\n"));
+  const fit = fitTransform(moving, fixed);
+  if (fit === null) return text;
   let a = 0;
   return lines.map((line) => {
     if (!isAtom(line)) return line;
-    const p = moving[a].map((value, k) => value - cm[k]);
+    const moved = fit.apply(moving[a]);
     a += 1;
-    const moved = r.map((row, k) => row[0] * p[0] + row[1] * p[1] + row[2] * p[2] + cf[k]);
     return line.slice(0, 30) + moved.map((value) => value.toFixed(3).padStart(8)).join("") + line.slice(54);
   }).join("\n");
 }

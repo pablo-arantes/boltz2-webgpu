@@ -665,6 +665,13 @@ function molTypeOf(input, token) {
  *          deletionMean: ArrayLike<number>, atomFeatures: Float32Array}} input
  * @param {number} tokens
  */
+let methodOverride = null;
+
+/** For the oracle tools only - see the note at `methodClass` below. */
+export function setMethodClassOverride(value) {
+  methodOverride = Number.isInteger(value) ? value : null;
+}
+
 export function targetFeatures(input, tokens, dialect) {
   // 🔴 boltz2's IS THE ATOM ENCODER'S COLUMNS ALONE. Everything else here
   // prepends a restype one-hot, a profile and a deletion mean - 31 + 31 + 1 -
@@ -672,6 +679,14 @@ export function targetFeatures(input, tokens, dialect) {
   // AF3's way it is 447 wide and the fold reads "targetFeat has 30396 elements;
   // expected 26112".
   const restypes = 31;
+  // Upstream's own value for a prediction with no experimental method; a
+  // caller that really is conditioning on a crystal structure may say so.
+  // 🔴 THE OVERRIDE EXISTS FOR ONE PURPOSE: taking a parity measurement
+  // against af3-any-model, whose boltz2 port feeds class 1. Nothing on the
+  // page sets it; `tools/gpu/fold.js --method-class=1` does, so a red oracle
+  // arm can be told from a regression.
+  const methodClass = methodOverride
+    ?? dialect?.methodClass ?? input.methodClass ?? 4;
   if (dialect?.targetFeatAtomOnly === true) {
     const output = Float32Array.from(input.atomFeatures.subarray(0, tokens * 384));
     const sum = input.sum;
@@ -712,9 +727,34 @@ export function targetFeatures(input, tokens, dialect) {
     // the cyclic flag: PRESENT or absent, not the period. Zero on every
     // ordinary input, so the trained weight only ever acts on a cyclic one.
     add(sum.cyclic, 1, (token) => Math.min(1, Math.max(0, input.cyclicPeriod?.[token] ?? 0)));
-    // `method` is the experimental method the prediction asks for, and the
-    // default is x-ray diffraction: class 1 of 12, the same for every token.
-    add(sum.method, 12, (_token, k) => (k === 1 ? 1 : 0));
+    // 🔴 `method` IS THE EXPERIMENTAL METHOD THE PREDICTION ASKS FOR, AND THIS
+    // WAS CLASS 1 - X-RAY DIFFRACTION - WHICH IS NOT WHAT GENUINE BOLTZ-2
+    // USES. Measured against upstream on a real job
+    // (tools/g8_localise.py, spec/G8-RESULT.md): `feats["method_feature"]` is
+    // **4** on every token, and upstream's own table reads
+    //
+    //     MD 0 · X-RAY DIFFRACTION 1 · ELECTRON MICROSCOPY 2 · SOLUTION NMR 3
+    //     SOLID-STATE NMR / NEUTRON / … / THEORETICAL MODEL / OTHER 4
+    //     AFDB 5 · BOLTZ-1 6 · FUTURE1..5 7..11
+    //
+    // so class 4 is the "no experiment / theoretical model" bucket, which is
+    // what a de novo prediction IS. Class 1 asks the model for a crystal
+    // structure of something that was never crystallised.
+    //
+    // 🔴 AND THE COST OF GETTING IT WRONG IS A CONSTANT, WHICH IS WHY NOTHING
+    // CAUGHT IT. The row is a learned 384-vector added identically to every
+    // token, so it shifts `target_feat` wholesale rather than distorting any
+    // one token's features - invisible to every per-token comparison, and
+    // measured here as **99.7% of the whole `s - a` discrepancy** (rms 0.164
+    // of 0.164). It reached the affinity module through `s_inputs` and the
+    // trunk pair, and it reaches every boltz2 STRUCTURE fold too.
+    //
+    // 🔴 THIS DIVERGES FROM af3-any-model, DELIBERATELY. docs/ records this
+    // port's boltz2 `target_feat` at ~1e-8 against af3-any-model's own dump,
+    // which can only hold if that port also feeds class 1 - so agreeing with
+    // it here means disagreeing with the checkpoint's own authors. For
+    // Boltz-2 weights, genuine Boltz-2 is the authority.
+    add(sum.method, 12, (_token, k) => (k === methodClass ? 1 : 0));
     // `modified` marks the tokens of a modified residue; row 0 is a learned
     // non-zero vector, so this term is present even when nothing is modified.
     add(sum.modified, 2, (token, k) => ((input.isModified?.[token] ? 1 : 0) === k ? 1 : 0));

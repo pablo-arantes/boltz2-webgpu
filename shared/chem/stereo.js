@@ -81,7 +81,7 @@ export function chiralCentres(graph) {
  * The centre's neighbours in the order SMILES wrote them, with "H" standing
  * for an implicit hydrogen in its correct place.
  */
-function neighbourOrder(graph, lists, centre) {
+export function neighbourOrder(graph, lists, centre) {
   const atom = graph.atoms[centre];
   // 🔴 THE PARSER'S WRITTEN ORDER, NOT THE BOND ORDER. See the note on
   // `writtenNeighbours` in smiles.js: a ring-closure bond is written as a
