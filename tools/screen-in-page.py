@@ -73,6 +73,17 @@ def main():
     # LocalFold's FOLDING page captioned as the screening page - a picture of
     # the wrong product. The only honest way to illustrate a page is to drive it
     # and photograph the result.
+    # 🔴 A DESKTOP VIEWPORT, BECAUSE EVERY CAPTURE BEFORE THIS WAS BELOW 900px
+    # AND THAT HID A LAYOUT DEFECT. Chrome's `--window-size` clamps at 500 (see
+    # tools/cdp.py's header), so every screenshot of this page was taken at a
+    # width where `@media (max-width: 900px)` had ALREADY collapsed the
+    # scene/table grid to one column - the two-column layout a reader on a
+    # 1280px screen actually saw could not appear in any of them. A user had to
+    # send a photograph of their own browser. `Emulation.setDeviceMetricsOverride`
+    # gives a true viewport at any width.
+    ap.add_argument("--width", type=int, default=1280,
+                    help="CSS viewport width to drive and photograph at")
+    ap.add_argument("--height", type=int, default=900)
     ap.add_argument("--screenshot", default=None,
                     help="write a PNG of the finished page to this path")
     ap.add_argument("--url", default=None,
@@ -122,6 +133,8 @@ def main():
             });
           })();
         """)
+        ws.call("Emulation.setDeviceMetricsOverride", width=args.width,
+                height=args.height, deviceScaleFactor=1, mobile=False)
         target = args.url or ("http://127.0.0.1:%d/screen.html" % PORT)
         print("driving:", target)
         started = time.time()
@@ -267,6 +280,8 @@ def main():
             clientWidth: canvas?.clientWidth ?? 0,
           };
         })()""")
+        print("viewport:", cdp.evaluate(ws,
+              "({ inner: innerWidth, column: document.body.clientWidth })"))
         print("viewer:", viewer)
         # 🔴 py2Dmol'S OWN STATE, because every outside symptom is consistent
         # with "the loader accepted the file and registered nothing": the

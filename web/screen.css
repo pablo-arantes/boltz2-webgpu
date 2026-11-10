@@ -18,8 +18,19 @@
   --bad: #b91c1c;
 }
 * { box-sizing: border-box; }
+/* 🔴 THE GROUND COLOUR GOES ON `html`, NOT ONLY ON `body`. Once the body is a
+   centred column with a max-width, its background stops covering the viewport
+   and the margins either side show the browser's default white. */
+html { background: var(--ground); }
 body {
-  margin: 0; padding: 1rem; background: var(--ground); color: var(--ink);
+  /* 🔴 ONE CENTRED COLUMN, 948px, WHICH IS LocalFold'S OWN `.page-width`.
+     index.html wraps its content in `<div class="mx-auto page-width">` and that
+     number is not arbitrary: 600 (the viewer canvas) + 8 (gap) + 340 (its side
+     panel). This page had no width at all, so on a wide screen every card
+     stretched edge to edge - a 164-residue sequence on one line and the MSA
+     control a thousand pixels from the label it belongs to. */
+  max-width: 948px;
+  margin: 0 auto; padding: 1rem; background: var(--ground); color: var(--ink);
   font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 h1 { font-size: 1.25rem; margin: 0; font-weight: 700; }
@@ -51,8 +62,13 @@ input[type="number"] { width: 5rem; }
   border-radius: 0.5rem; padding: 0.5rem 0.75rem; margin-bottom: 0.75rem;
 }
 #status.bad { background: #fef2f2; border-color: #fecaca; color: var(--bad); }
-.split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
-@media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+/* 🔴 ONE AFTER THE OTHER, NOT SIDE BY SIDE. The scene and the ranked table were
+   two columns of a 1fr 1fr grid, which halved both: the viewer got ~340px of a
+   1280px window and the scatter was squeezed beside a table of six numeric
+   columns. Stacked, each gets the full 948 and the page reads top to bottom -
+   target, ligands, settings, queue, scene, ranking - the way LocalFold's does.
+   The grid is kept rather than replaced so the gap rule still applies. */
+.split { display: grid; grid-template-columns: 1fr; gap: 0.75rem; }
 #viewer { height: 420px; border-radius: 0.375rem; overflow: hidden;
   background: #fff; position: relative; }
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
