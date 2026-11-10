@@ -26,7 +26,13 @@ import json, math, pathlib, re, subprocess, sys
 # run from anywhere: the README is beside this tool's parent
 # the repository root: tools/ lives inside the app tree, which IS the repo
 root = pathlib.Path(__file__).resolve().parent.parent
-t = (root / "README.md").read_text()
+# 🔴 THE README **PLUS** THE DOCS SPLIT OUT OF IT. The README was 506 lines and
+# is now 172: the measured tables went to docs/MEASURED.md and the provenance to
+# docs/PROVENANCE.md. The claims did not stop applying because the prose moved,
+# so this reads all three - and a claim that says "stated once" still means once
+# ACROSS them, which is why they are concatenated rather than searched in turn.
+t = "\n".join((root / name).read_text() for name in
+               ("README.md", "docs/MEASURED.md", "docs/PROVENANCE.md"))
 bad = []
 
 def claim(ok, what):

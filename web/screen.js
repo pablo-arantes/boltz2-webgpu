@@ -175,6 +175,39 @@ function renderQueue() {
 }
 
 /**
+ * Un-hide py2Dmol's viewer, and resize its canvas.
+ *
+ * 🔴 WITHOUT THIS THE SCENE IS BLANK AND NOTHING REPORTS A FAULT. The vendor
+ * subtree is copied from index.html with `style="display: none;"` on
+ * `#viewer-container`, because index.html reveals it when a fold lands - and
+ * this page never did. So the structure WAS loaded, py2Dmol held it, the note
+ * read "target drawn once; 3 of 3 ligands superposed", and the reader saw an
+ * empty box. A probe that asserts the scene's own bookkeeping cannot see this;
+ * only looking at the page can, which is how it was found.
+ *
+ * 🔴 AND THE RESIZE IS NOT OPTIONAL. A WebGL canvas laid out inside
+ * `display: none` has no size, so revealing the container alone leaves a 0x0
+ * drawing buffer and the box stays blank. `_updateCanvasDimensions` is what
+ * index.html calls for the same reason.
+ */
+function revealViewer() {
+  const container = document.getElementById("viewer-container");
+  if (container !== null && getComputedStyle(container).display === "none") {
+    container.style.display = "flex";
+  }
+  try {
+    const registry = globalThis.py2dmol_viewers ?? {};
+    const renderer = registry[Object.keys(registry)[0]]?.renderer;
+    // 🔴 RESIZE **AND** RENDER, which is the pair the vendor bundle itself
+    // uses: its own ResizeObserver runs `_updateCanvasDimensions(),
+    // render("ResizeObserver")`. A resize alone changes the buffer and draws
+    // nothing into it.
+    renderer?._updateCanvasDimensions?.();
+    renderer?.render?.("screen-reveal");
+  } catch { /* a resize is not worth losing the scene over */ }
+}
+
+/**
  * Hand the scene to py2Dmol.
  *
  * 🔴 ONE OBJECT PER UPDATE, NOT ONE PER LIGAND, AND THE COST IS NAMED. py2Dmol
@@ -212,7 +245,30 @@ function drawScene() {
   const pdb = parts.join("\n");
   const file = (name, text) => ({ name, readAsync: () => Promise.resolve(text) });
   try {
-    load([file("screen.pdb", pdb)]);
+    // 🔴 REVEALED **BEFORE** THE LOAD, AND THAT ORDER IS THE WHOLE FIX. py2Dmol
+    // fits its camera to the structure as it ingests it, reading the canvas's
+    // own size; a canvas laid out inside `display: none` is 0x0, so loading
+    // first and revealing afterwards left a correctly sized canvas showing
+    // nothing - the container was visible, the buffer was 707x707, and the box
+    // was white. Revealing first means the fit happens against a real
+    // viewport.
+    //
+    // 🔴 AND IT IS RE-ASSERTED AFTERWARDS, because the vendor bundle finishes
+    // building asynchronously and re-applies the hidden state it was handed:
+    // measured `before: none -> after: flex` on the synchronous call and
+    // `display: none` again by the end of the run.
+    revealViewer();
+    const loaded = load([file("screen.pdb", pdb)]);
+    Promise.resolve(loaded)
+      .then(() => { revealViewer(); requestAnimationFrame(revealViewer); })
+      // 🔴 AN ASYNC REFUSAL MUST BE REPORTED, NOT SWALLOWED. `py2dmolLoadFiles`
+      // is `processFiles`, which is async: the synchronous `catch` below cannot
+      // see it reject, so an empty handler here turns a failed load into a
+      // blank box with no message - which is exactly the symptom this whole
+      // fix started from.
+      .catch((error) => {
+        say(`the viewer refused the scene: ${error?.message ?? error}`, true);
+      });
   } catch (error) {
     say(`the viewer refused the scene: ${error?.message ?? error}`, true);
     return;

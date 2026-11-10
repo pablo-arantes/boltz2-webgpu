@@ -25,6 +25,10 @@
  */
 import { writeZip } from "./zip.js";
 import { fileSafeId } from "../shared/input/smi.js";
+// 🔴 A CYCLE USED ONLY AT CALL TIME: screen-view.js reads `statusOf` from this
+// file, so this is export -> view -> export. Every use is inside a function
+// body, which is what makes it safe; do not hoist either to the top level.
+import { drawScatter } from "./screen-view.js";
 
 /**
  * The columns, in order, with how each is read off a result.
@@ -150,6 +154,18 @@ export async function screenArchive(results, options = {}) {
     entries.push([`structures/${names.get(result.id)}.pdb`, result.pdb]);
     written += 1;
   }
+  // 🔴 THE PLOT GOES IN, BECAUSE THE SCATTER IS HOW A SCREEN IS READ. The
+  // archive used to hold the numbers and the structures and leave out the one
+  // picture the page exists to draw, so "download the data" lost the thing a
+  // reader had been looking at. Reported by a user, which is the tell that no
+  // gate asserted the member list against what the page shows.
+  //
+  // 🔴 IT IS RE-DRAWN FROM THE RESULTS, NOT SCRAPED OFF THE PAGE, so it always
+  // agrees with affinity.csv beside it. Serialising the live SVG would export
+  // whatever the reader had hidden or highlighted at the moment they clicked,
+  // and that picture would disagree with the CSV it ships with.
+  const plot = screenPlotSvg(results, options);
+  if (plot !== null) entries.push(["affinity.svg", plot]);
   entries.push(["README.txt", archiveReadme(results, written, options)]);
   return writeZip(entries, { store: options.store === true });
 }
@@ -173,6 +189,8 @@ export function archiveReadme(results, structures, options = {}) {
     `target:     ${options.target ?? "(unnamed)"}`,
     `ligands:    ${results.length} (${tally})`,
     `structures: ${structures} .pdb under structures/`,
+    "plot:       affinity.svg - the scatter, re-drawn from the rows below so it",
+    "            cannot disagree with affinity.csv",
     `settings:   ${settings.recyclingSteps ?? "?"} recycles,`
       + ` ${settings.samplingSteps ?? "?"} sampler steps,`
       + ` ${settings.diffusionSamples ?? "?"} diffusion samples`,
@@ -221,4 +239,33 @@ export function archiveReadme(results, structures, options = {}) {
     "Structures are from pass 1 (the whole target plus the ligand). The",
     "affinity itself is predicted from pass 2, a re-folded pocket crop.",
   ].join("\n");
+}
+
+/**
+ * The scatter as a standalone SVG document, or null where it cannot be drawn.
+ *
+ * 🔴 THE SAME `drawScatter` THE PAGE USES, so the archive cannot drift from
+ * the screen. It sets every colour, stroke and font as an ATTRIBUTE rather
+ * than through a class, which is what lets the markup stand on its own in a
+ * file - the page's stylesheet is not in the zip.
+ *
+ * 🔴 AND IT NEEDS A DOCUMENT. `screenArchive` is called from the page and from
+ * the probes, both in a browser, but a caller without a DOM gets null and the
+ * rest of the archive rather than an exception.
+ */
+export function screenPlotSvg(results, options = {}) {
+  if (typeof document === "undefined") return null;
+  try {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    drawScatter(svg, results, { colourBy: options.colourBy });
+    // a width and height so it opens at a sensible size on its own; drawScatter
+    // writes the viewBox
+    svg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    if (!svg.getAttribute("width")) svg.setAttribute("width", "440");
+    if (!svg.getAttribute("height")) svg.setAttribute("height", "240");
+    const markup = new XMLSerializer().serializeToString(svg);
+    return `<?xml version="1.0" encoding="UTF-8"?>\n${markup}\n`;
+  } catch {
+    return null;                 // a lost picture is not a lost archive
+  }
 }

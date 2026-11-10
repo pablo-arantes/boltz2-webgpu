@@ -1,0 +1,253 @@
+# How it is checked, what was measured, and what is still wrong
+
+Split out of the README so that file can stay short. Every number here is
+measured; `spec/G8-RESULT.md` carries the full comparisons against upstream
+PyTorch Boltz-2, including the retractions.
+
+## How it is checked
+
+Every gate is a `npm run` script at the repository root, with its own one-paragraph
+description in `package.json` saying what it caught.
+
+| gate | what it establishes |
+|---|---|
+| `test:affinity-mw` | the molecular weight agrees with **RDKit's** table, which is what the MW correction's coefficients were fitted against. Found this port's IUPAC-2021 table disagreeing with RDKit on **51 of 86 elements** — being more correct than RDKit is the bug here. |
+| `test:affinity-quant` | the manifest's `float32Tensors` list actually protects the norms. `quantize_af3.py`'s `KEEP_FLOAT32` regex is slash-separated and upstream's names are dot-separated, so it matches **none** of them; without the list every LayerNorm scale would be int5. `--falsify` empties it and requires degradation. |
+| `test:affinity-oracle` | the f64 reference computes upstream's function, seam by seam, against a dump of the **real module** (forward hooks on upstream's own `AffinityModule`). 9 real weight-swap mutations as a separation control. |
+| `test:affinity-contract` | LocalFold's own pair kernels accept Boltz-2's weights. Five layouts pinned by measurement; each re-run with the wrong orientation and required to disagree. |
+| `test:affinity-gpu` | the GPU pairformer computes the f64 reference's answer. **Found the incoming triangle's a/b order reversed** — `tri_mul_out` was exact at 1.0e-7 while `tri_mul_in` read 0.304, which the host gate could not see because its reference is outgoing-only. |
+| `test:affinity-forward` | the whole function — LayerNorms, projections, broadcast sum, distogram, conditioner, stack, pooling, all three heads — against upstream's dump. |
+| `test:affinity-crop` | an **exact index-set** comparison against upstream's `AffinityCropper` over 12 cases reaching all three break conditions. |
+| `test:affinity-sinputs` | upstream's `affinity=True` substitution reaches `s_inputs`, and only through the profile. |
+| `test:affinity-project` | the new fused kernel against a reference written in the gate. Its falsify input needs rows whose **variance is the size of eps**, because the convention is invisible at variance ≈ 1 *and* at variance exactly 0 — the control missed it twice before the input could express it. |
+| `test:affinity-keys` | the affinity stack does not collide with the trunk in one pipeline cache, in both orders. The shapes are identical (128 channels, 4 heads of 32). |
+| `test:affinity-memory` | the screening loop does not leak GPU memory across ligands. Two phases, because growth across ligands of *different sizes* is correct behaviour. |
+| `test:boltz2-featurise` | the batch agrees with **upstream Boltz's own featuriser** — a reference this port did not have, since `test:batch` compares against the AF3 featuriser this port derives from. Needs no CCD and no 1.86 GB `mols.tar`. |
+| `test:screen-page` | the **page**, driven through its own controls. Caught `uniqueIds` returning ids rather than entries (every job `id: undefined`) and py2Dmol silently overwriting the page's status line. |
+| `npm test` / `test:boltz2-method-class` | pins boltz2's method conditioning class against upstream's published table. It exists because a wrong constant here moved a predicted IC50 by a factor of 2.2 and no per-token differential could see it — the row is added identically to every token. Fails 3/3 with the fix reverted. |
+| `npm run bench:g8` | the whole pipeline against **upstream Boltz running the same job** — the one thing the function-level gates cannot see, since they compare a function to a function on identical input. Not a CI gate: upstream runs on CPU here, ~2 minutes a seed, and needs 6.1 GB of its own assets. **It found a systematic 0.343 log-unit gap that every other gate missed.** |
+| `python3 tools/check_readme_claims.py` | this README's own checkable claims — the pinned SHAs against `spec/PINNED_COMMIT.txt`, every file path it names, every gate it lists, the licence text, and the affinity bundle's tensor and shard counts. It caught this file claiming 6.5 MiB where the manifest says 6.4. |
+| `npm test` | 1,704 unit tests (1,703 pass, 1 skipped), including the `.smi` parser, the run loop's stop/resume and failure paths, the CSV/ZIP, the superposition and the MSA cache. |
+
+## Measured
+
+On an M2 (`apple / metal-3`), a 33-residue target, cropping to 36–46 tokens:
+
+| setting | per ligand |
+|---|---|
+| 1 recycle / 12 steps / 1 sample | **1.7 s** |
+| 3 / 100 / 1 | **6.0 s** |
+| 5 / 200 / 3 | **22.8 s** |
+| 3/200/1 then 5/200/5 — **upstream's own settings, both passes** | **34.6 s** |
+
+Bundles: 365 MiB structure (24 shards) + 6.4 MiB affinity (8 shards, 33 MiB
+decoded). GPU memory across a run: resident **19 MiB flat**, peak **727 MiB**;
+with buffer pooling disabled the same loop grows **492 MiB a ligand**, which is
+the failure the gate exists for.
+
+🔴 **Upstream's own settings are 3/200/1 for the structure pass and 5/200/5
+for the affinity pass**, and the second half of that was recorded here as
+5/200/**3** until the G8 work read it off the CLI rather than the function
+signature: `predict`'s signature says `diffusion_samples_affinity: int = 3`,
+its click option says `default=5`, and click passes its value — so a plain
+`boltz predict` runs five. The same question had already been answered the
+other way for the molecular-weight correction, where this port deliberately
+follows the CLI.
+
+🔴 **Step count is not a free knob.** At 4 sampler steps the ligand comes out as
+a collapsed blob (ethanol's three atoms within 0.4 Å); at 50 it is a molecule
+(C–C 1.46 Å, C–O 1.34 Å against ideals of 1.52 and 1.43) on a backbone with
+CA–CA median 3.818 Å. The page defaults below upstream's settings and says so on
+its own status line.
+
+🔴 **The superposed scene carries the target's own variation.** Each ligand is
+co-folded with its own copy of the target, so Kabsch alignment on the target's
+CA atoms removes the frame but not the conformational difference. Two ligands at
+50 steps: **24.16 Å rms apart before the fit, 4.14 Å after** (worst 44.55 →
+8.27). Three ligands at 3 recycles / 100 steps: residuals of **0.745 Å and
+8.814 Å** against run #1, with the ligand centroids 9.2–14.1 Å apart. The page
+prints the worst residual rather than letting a reader compare poses to a
+precision the data does not have.
+
+## Known limits
+
+- **The affinity bundle has no published remote.** `MODEL_BUNDLES` names a local
+  directory, so a deployed site would 404; `build_site.py` treats the page as
+  optional for that reason. Publishing the export and pinning its revision is a
+  one-line change in the registry.
+- 🔴 **Neither output is upstream's yet, and which one is closer depends on the
+  question.** G8 — `npm run bench:g8`, upstream's own checkpoints on CPU
+  against this port — found a systematic gap and localised it to two inputs.
+  One is **fixed**: this port fed method conditioning class 1 (X-ray
+  diffraction) where genuine Boltz-2 feeds 4 (de novo), a constant 384-vector
+  on every token; that took `s_inputs`'s protein tokens to the int5
+  quantisation floor. The other is **not**: a SMILES ligand's **atom names**,
+  256 of the atom encoder's 388 input columns, where upstream uses RDKit's
+  canonical rank over the hydrogen-bearing molecule (`C20 C22 … O13`) and this
+  port uses AF3's per-element counter (`C1 … O1`) — **not one of ten names
+  agrees**. Substituting upstream's names takes the atom encoder's ligand half
+  from relRMS **1.1556 to 4.48e-2**, the quantisation floor, so the names are
+  the whole of what is left.
+- 🔴 **Measured across six chemically varied ligands, not one, and re-measured
+  after two defects were fixed:**
+
+  | Spearman ρ vs upstream | first measured | + review fixes | **+ atom names and the bond code** | discordant |
+  |---|---|---|---|---|
+  | `affinity_pred_value` / pIC50 | −0.03 | +0.31 | **+0.886** | 8 → 5 → **2 of 15** |
+  | `affinity_probability_binary` | +0.89 | +0.89 | **+1.000** | 2 → 2 → **0 of 15** |
+
+  🔴 **BOTH HEADS RANK NOW, AND THE VALUE HEAD'S "DOES NOT RANK" VERDICT IS
+  RETRACTED.** It was true of every state measured before the SMILES atom names
+  and the bond-type code were fixed; with both, aspirin goes 1.0201 → 1.5561
+  against upstream's 1.5887, ethanol 2.3878 → 1.4400 against 1.4100, and
+  nicotine 1.5061 → 0.9977 against 0.8530.
+
+  🔴 **AND THE TWO REMAINING INVERSIONS ARE WEIGHED AGAINST UPSTREAM'S OWN SEED
+  SPREAD, NOT COUNTED.** Its half-range on this target is 0.0570 log units.
+  `propylphenol/naphthol` are **0.0165 apart in upstream's own numbers** — well
+  inside that, so upstream does not resolve them at one seed and neither side
+  can be said to have them the wrong way round. `ibuprofen/nicotine` are 0.0771
+  apart, outside it, and that one is a genuine inversion.
+
+  🔴 **AND n = 6 IS STILL SMALL, WHICH THE ρ DOES NOT HIDE.** At six ligands
+  +0.886 sits essentially ON the 5% two-tailed critical value, so it is a real
+  but thinly supported correlation; +1.000 is p ≈ 0.003. The ranking control is
+  also **one upstream seed per ligand**, so it carries no spread of its own —
+  the per-ligand numbers are compared against a single draw.
+- 🔴 **Two science defects were found by a cold code review and fixed, and they
+  invalidated the measurement above until it was re-run.** Both were in the
+  composition, which every function-level gate is blind to by construction:
+  * the affinity module's distogram was fed `fold.positions`, which is indexed
+    by dense **atom slot** (`token*dense + atom`), where the module indexes one
+    coordinate **per token** — so it read the first ~11 tokens' atoms, masked
+    slots included, as if they were 256 token centres. It now receives
+    `fold.pseudoBeta` (the disto gather, `tokens*3`). The float64 reference
+    asserted this contract and threw; the GPU path had no length check, and now
+    has one.
+  * the trunk pair was handed over **unmasked**, directly below a comment
+    claiming it was masked. Upstream applies `z * cross_pair_mask` before the
+    module's LayerNorm and projections; the dump tool did and the page did not,
+    so the two disagreed about the module's own input.
+
+  Fixing both moved one ligand's value 1.3596 → 1.1708 and its probability
+  0.3321 → 0.2964 (upstream 1.3541 ± 0.057, 0.2243 ± 0.009). **The classifier's
+  ρ did not move at all** — the same two pairs invert — which says its ordering
+  is robust to both defects and is driven by what reaches it through
+  `s_inputs`. That is where the atom-name difference lives, so the attribution
+  below survives the re-measurement; it was **not** safe to assert before it.
+- 🔴 **The blocker that made this "not shippable as a screening tool" is now
+  closed, and it was closed the way it was stated.** Reproducing RDKit's
+  `CanonicalRankAtoms` was called required rather than optional, gated on exact
+  integer agreement over the 74-molecule corpus: `npm run test:canonical-rank`
+  is **74/74** and `npm run test:canonical-names` carries the names through the
+  page's own parser. Fixing it, together with an off-by-one in boltz2's
+  bond-type embedding index, took the module's two conditioning inputs to the
+  int5 quantisation floor (`s_inputs` 4.38e-2 against a floor of 4.14e-2; `z`
+  3.10e-2 against 3.04e-2, from 2.00e-1) and both affinity heads to the
+  rankings above. What is still NOT established is agreement with EXPERIMENT:
+  every number here is agreement with upstream Boltz-2 on one 33-residue
+  target, single-sequence, over six ligands.
+- 🔴 **The method-class fix changes every boltz2 structure fold too**, since
+  `target_feat` is shared: pLDDT 87.9 → 82.9 and pTM 0.666 → 0.525 on one
+  target, while the ligand gate's bond rms improves 0.062 → 0.049 Å. Less
+  confident, more correct — but **no RMSD against a known structure has been
+  measured either way**, and that is the outstanding check on the change.
+- **`s_inputs` is not compared to upstream's embedder elementwise.** The
+  substitution is shown to reach the output and to move only where it should;
+  comparing the embedder itself needs upstream's whole featuriser stood up.
+- The scene is handed to py2Dmol as one concatenated structure per update, so
+  show/hide is a redraw. Cheap for hundreds of small ligands, wrong for
+  thousands.
+- A 33-residue test target has no real pocket. The ligand placements measured
+  above are a plumbing result, not a docking result.
+
+## Publishing
+
+The site builds and deploys from `main` through
+`.github/workflows/pages.yml`.
+
+- 🔴 **THE DEPLOY REFUSES A SITE WITH NO SCREENING PAGE, WHICH IS THE ONE
+  FAILURE THAT WOULD LOOK LIKE SUCCESS.** `screen.html` opens the
+  `boltz2-affinity` bundle through `openStore`; while that bundle's `remote`
+  was null, `bundleBaseUrl` fell back to `./model-boltz2-affinity-int5/` - a
+  local export the build deliberately never copies - and every visitor would
+  have 404'd on shard zero. `tools/build_site.py` drops an unservable page and
+  says so, the same rule it already applied to an unservable model `<option>`
+  one control further out, and the workflow turns that into a failed build.
+  Watched failing both ways before being trusted: with the remote null the page
+  is dropped and the deploy refuses, with it pinned the page ships and nothing
+  is dropped.
+
+- 🔴 **AND IT REFUSES ANY ROOT-ABSOLUTE REFERENCE**, because a project page is
+  served from `/<repo>/` and a single `/`-rooted asset, worker, WASM or
+  manifest path is the usual reason a fork 404s on Pages. `dist/` is entirely
+  relative; the workflow fails if that stops being true, so no base-path
+  rewriting step is needed and none is guessed at.
+
+- 🔴 **THE AFFINITY BUNDLE IS PINNED TO A REVISION, NOT A BRANCH.** 6.51 MiB in
+  eight shards plus the manifest at
+  `pabloarantes/boltz2-webgpu-weights@adf393c7`, fetched only when a reader
+  asks for an affinity. `resolve/<sha>/` cannot change under a visitor where
+  `resolve/main/` would re-point on any re-upload. Verified as a BROWSER sees
+  it rather than as an upload tool reports it: fetched with a
+  `https://pablo-arantes.github.io` Origin, `access-control-allow-origin`
+  echoed back on both the redirect and the file, and the bytes compared against
+  the local export - manifest and shard zero identical. `python3
+  tools/check_remote_bundle.py boltz2-affinity` finds all 8 shards.
+
+  The export itself is checked against the float32 one by
+  `tools/check-affinity-quantisation.py --f32=model-boltz2-affinity-f32
+  --int5=model-boltz2-affinity-int5`: norms and output projections byte-exact,
+  the large projections at 3.88e-2, which is int5's own level.
+
+- 🔴 **NO WEIGHTS ARE TRACKED, AND ONE OVERSIZED FILE IS - DECLARED, NOT
+  HIDDEN.** `npm run test:sizes` (`tools/check_repo_sizes.py`) fails on any
+  tracked file over 10 MiB that is not declared with a reason, and fails again
+  if a declared one leaves the tree, so the brief's "report anything over
+  ~10 MB before committing" is a gate rather than a promise. Today: **1536
+  tracked files, 70.1 MiB**, one file over the limit -
+  `oracle-dumps/af3-6mrr.json` at 18.5 MiB, AlphaFold 3's own featurised batch
+  for 6MRR, inherited from LocalFold and read by four tools. It is **not
+  published**: the same gate checks `dist/` and finds nothing over the limit
+  there, so it costs a visitor nothing.
+
+- 🔴 **NOTHING NEEDS COOP/COEP.** No `SharedArrayBuffer` and no threaded WASM,
+  so the headers GitHub Pages cannot set are not required. Checked with a
+  pattern over the tree and over `dist/`, not assumed.
+
+### The live site, driven rather than eyeballed
+
+`tools/screen-in-page.py --url=<the published page>` wipes the Chrome profile
+and drives the deployed site through CDP - no HTTP cache, no CacheStorage, no
+compiled shaders - so what it measures is a first visit. One target (33
+residues) and three ligands, at 1 recycle / 20 steps / 1 sample:
+
+| | single sequence | with the MMseqs2 search |
+|---|---|---|
+| cold start to a runnable page | **79.2 s / 103.6 s** (two runs) | **50.2 s** |
+| three ligands scored | 12 s / 6 s | 7 s |
+| `api.colabfold.com` requests | **0** | **2, for 3 ligands** |
+| ZIP | README.txt, affinity.csv, 3 PDBs | same, 19,171 B |
+| CSV | 5 lines | 5 lines |
+| ligands superposed onto run #1 | 3 of 3 | 3 of 3 |
+
+🔴 **COLD START IS ALMOST ENTIRELY THE STRUCTURE BUNDLE** - 365 MiB of it
+against the affinity bundle's 6.51 - and it varies with the connection more
+than with anything this code does, which is why three numbers are given rather
+than one.
+
+🔴 **AND THE SINGLE-SEQUENCE OPT-OUT IS A MEASURED ZERO, NOT A PROMISE.**
+Resource timing records every request the page made; in that mode the count
+aimed at api.colabfold.com is exactly 0. With the search on it is 2 for THREE
+ligands rather than six, which is the page's "searched once per target and
+cached by sequence hash" as a count. The alignment demonstrably reached the
+model: the same three ligands come back with different ipTM (0.63/0.58/0.43
+against 0.38/0.58/0.28), which only an alignment would do.
+
+🔴 **ONE THING WORKED LOCALLY AND NOT ON PAGES, AND IT WAS THE PROBE.**
+`import('/web/screen-export.js')` resolves at `/` under a local server and
+fetches `<host>/web/screen-export.js` - base dropped - under a project page.
+The page's own imports are all relative; the harness's was not. Fixing it also
+exposed that the workflow's root-absolute guard matched only DOUBLE quotes, so
+a single-quoted `import('/...')` would have passed the check written to stop
+exactly that. Both fixed, and `dist/` is clean under the wider pattern.

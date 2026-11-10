@@ -26,6 +26,8 @@ this probe is not evidence about a published site.
 """
 import argparse
 import json
+import base64
+import pathlib
 import os
 import shutil
 import time
@@ -67,6 +69,12 @@ def main():
     ap.add_argument("--msa", default="none",
                     help="the MSA dial: none (default) or mmseqs2, which sends"
                          " the target sequence to api.colabfold.com")
+    # 🔴 A SCREENSHOT OF THIS PAGE, because the README's was a screenshot of
+    # LocalFold's FOLDING page captioned as the screening page - a picture of
+    # the wrong product. The only honest way to illustrate a page is to drive it
+    # and photograph the result.
+    ap.add_argument("--screenshot", default=None,
+                    help="write a PNG of the finished page to this path")
     ap.add_argument("--url", default=None,
                     help="drive this URL instead of a local server, e.g."
                          " https://pablo-arantes.github.io/boltz2-webgpu/screen.html")
@@ -214,6 +222,36 @@ def main():
         if not drawn["downloadEnabled"]:
             failures.append("the download button is still disabled")
 
+        # 🔴 IS THE VIEWER ACTUALLY ON SCREEN? The scene's own bookkeeping said
+        # "target drawn once; 3 of 3 ligands superposed" while the reader saw an
+        # empty box, because py2Dmol's subtree is copied from index.html with
+        # `display: none` and only index.html un-hid it. A probe that asserts
+        # what the page BELIEVES cannot see that; this asserts the computed
+        # style and the canvas's drawing buffer, because a WebGL canvas laid out
+        # while hidden has no size even once it is revealed.
+        viewer = cdp.evaluate(ws, """(() => {
+          const box = document.getElementById('viewer-container');
+          const canvas = document.getElementById('canvas');
+          return {
+            display: box === null ? 'missing' : getComputedStyle(box).display,
+            width: canvas?.width ?? 0, height: canvas?.height ?? 0,
+            clientWidth: canvas?.clientWidth ?? 0,
+          };
+        })()""")
+        print("viewer:", viewer)
+        if viewer["display"] in ("none", "missing"):
+            failures.append(f"the 3D viewer is {viewer['display']} - a blank scene")
+        if viewer["width"] < 2 or viewer["height"] < 2:
+            failures.append("the viewer canvas has no drawing buffer"
+                            f" ({viewer['width']}x{viewer['height']})")
+
+        if args.screenshot:
+            shot = ws.call("Page.captureScreenshot",
+                           format="png", captureBeyondViewport=True)
+            pathlib.Path(args.screenshot).write_bytes(
+                base64.b64decode(shot["data"]))
+            print("screenshot:", args.screenshot)
+
         # --- the archive, read back ---------------------------------------
         archive = cdp.evaluate(ws, """(async () => {
           // 🔴 RESOLVED AGAINST THE PAGE, NOT THE SERVER ROOT. A root-absolute
@@ -231,6 +269,10 @@ def main():
           const members = await readZip(bytes);
           return { names: [...members.keys()].sort(), bytes: bytes.length,
                    csv: (members.get('affinity.csv') ?? '').split('\\n').length,
+                   // a circle per scored ligand; an empty <svg> would pass a
+                   // presence check and show nothing
+                   plotPoints: ((members.get('affinity.svg') ?? '')
+                     .match(/<circle/g) ?? []).length,
                    readme: (members.get('README.txt') ?? '').slice(0, 0) === '' };
         })()""")
         print("archive:", archive)
@@ -250,6 +292,14 @@ def main():
                             " %d time(s)" % msa_calls["total"])
         if "affinity.csv" not in archive["names"]:
             failures.append("the archive has no CSV")
+        # 🔴 THE PLOT TOO. The archive shipped the numbers and the structures
+        # and left out the scatter - the one picture this page exists to draw -
+        # and nothing here asserted the member list, so a reader found it
+        # before any gate did.
+        if "affinity.svg" not in archive["names"]:
+            failures.append("the archive has no plot (affinity.svg)")
+        if archive.get("plotPoints", 0) < 1:
+            failures.append("affinity.svg has no plotted points")
     finally:
         if not args.keep:
             proc.kill()
