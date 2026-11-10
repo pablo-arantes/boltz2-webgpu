@@ -251,3 +251,57 @@ The page's own imports are all relative; the harness's was not. Fixing it also
 exposed that the workflow's root-absolute guard matched only DOUBLE quotes, so
 a single-quoted `import('/...')` would have passed the check written to stop
 exactly that. Both fixed, and `dist/` is clean under the wider pattern.
+
+
+## 🔴 OPEN: the screening page's 3D scene is blank (2026-11-10)
+
+Reported by a user. One fault found and fixed, a second found and NOT fixed.
+
+**Fixed:** py2Dmol's DOM is copied into `screen.html` from `index.html` with
+`style="display: none"` on `#viewer-container`, because `index.html` reveals it
+when a fold lands - and this page never did. `drawScene` now reveals it before
+handing over the structure (py2Dmol fits its camera at ingest time, reading the
+canvas size, and a canvas laid out inside `display: none` is 0x0), re-asserts
+after the loader settles, and pairs `_updateCanvasDimensions()` with
+`render()` the way the vendor's own ResizeObserver does. Measured: the container
+is now `display: flex` with the canvas at 705x705 and `clientWidth` 705 rather
+than 0.
+
+**Still blank, and here is exactly how far it is localised.** py2Dmol accepts
+the file, resolves without rejecting, and registers NOTHING:
+
+| measurement | value |
+|---|---|
+| `py2dmolLoadFiles` return | `{objectsLoaded: 1, structureCount: 1, framesAdded: 0}` |
+| `renderer.coords` | `array(0)` |
+| `renderer.chains`, `plddts` | `array(0)` |
+| `renderer._framedObjects` | `[]` |
+| the structure picker's options | `[]` |
+| the scene PDB itself | 284 lines, well-formed `ATOM` records |
+
+So an object is created with **no frame**, and a structure with no frame has no
+coordinates to draw. Everything observable from outside - container visible,
+canvas sized, promise resolved, no error reported - is consistent with success,
+which is why this survived.
+
+🔴 **TWO THINGS TRIED AND REVERTED, because neither moved `framesAdded`**: a
+`<stem>_scores.json` beside the PDB (the only structural difference from
+`index.html`'s working call), and wrapping the scene in one `MODEL`/`ENDMDL`
+block (py2Dmol's parser delimits frames on `MODEL` records, and LocalFold's own
+PDBs arrive as a trajectory). Recorded so neither is tried a third time.
+
+**The next measurement**, and it is a confound in the ones above:
+`loader says:` in the probe is the probe's OWN second load of the same text, and
+py2Dmol may legitimately report `framesAdded: 0` for an object it already holds.
+Capture the PAGE's first load result - assign the return of `load(...)` in
+`drawScene` to a global and read THAT - before concluding anything further about
+the frame count.
+
+**And the gate that should have caught it now exists.**
+`tools/screen-in-page.py` asserts the computed style, the canvas's drawing
+buffer, and `renderer.coords.length > 0`. What it asserted before was the scene
+NOTE's text, which the page writes from its own bookkeeping whether or not one
+atom reached the viewer - so a blank box reported "3 of 3 ligands superposed
+onto run #1". `test/py2dmol-scaffold.test.js` already said this probe was "the
+authority on what is required... asserts at RUNTIME that the scene drew"; it
+did not.

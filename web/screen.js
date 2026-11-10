@@ -243,6 +243,11 @@ function drawScene() {
   }
   parts.push("END");
   const pdb = parts.join("\n");
+  // 🔴 EXPOSED FOR THE PROBE, which re-loads this exact text through
+  // `py2dmolLoadFiles` and prints the loader's own counters. That is what
+  // showed the scene is an object with no FRAME - see the blank-scene note in
+  // docs/MEASURED.md - and the diagnosis is not reproducible without it.
+  globalThis.__scenePdb = pdb;
   const file = (name, text) => ({ name, readAsync: () => Promise.resolve(text) });
   try {
     // 🔴 REVEALED **BEFORE** THE LOAD, AND THAT ORDER IS THE WHOLE FIX. py2Dmol

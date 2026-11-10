@@ -239,11 +239,78 @@ def main():
           };
         })()""")
         print("viewer:", viewer)
+        # 🔴 py2Dmol'S OWN STATE, because every outside symptom is consistent
+        # with "the loader accepted the file and registered nothing": the
+        # container is visible and sized, the promise resolves, no error is
+        # reported, and the structure picker is empty. Walk the registry rather
+        # than guess which field holds the structures.
+        print("pdb head:", cdp.evaluate(ws,
+              "(globalThis.__scenePdb ?? '(none)').split('\\n').slice(0,3)"))
+        print("pdb lines:", cdp.evaluate(ws,
+              "(globalThis.__scenePdb ?? '').split('\\n').length"))
+        # 🔴 THE LOADER'S OWN RETURN VALUE. processFiles reports
+        # {objectsLoaded, framesAdded, structureCount}; the renderer holds
+        # coords: array(0), so it registered nothing from a file it accepted
+        # without error, and only these counts say at which step it gave up.
+        print("loader says:", cdp.evaluate(ws, """(async () => {
+          const text = globalThis.__scenePdb;
+          if (!text) return 'no scene pdb';
+          const f = { name: 'probe.pdb', readAsync: () => Promise.resolve(text) };
+          try { return await globalThis.py2dmolLoadFiles([f]); }
+          catch (e) { return 'threw: ' + (e?.message ?? e); }
+        })()"""))
+        print("registry:", cdp.evaluate(ws, """(() => {
+          const reg = globalThis.py2dmol_viewers ?? {};
+          const keys = Object.keys(reg);
+          const out = { viewers: keys };
+          const v = reg[keys[0]];
+          if (!v) return out;
+          out.viewerKeys = Object.keys(v);
+          const describe = (o) => {
+            if (o === null || o === undefined) return String(o);
+            if (Array.isArray(o)) return `array(${o.length})`;
+            if (o instanceof Map) return `map(${o.size})`;
+            if (typeof o === 'object') return Object.keys(o).slice(0, 14);
+            return typeof o;
+          };
+          out.fields = {};
+          for (const k of Object.keys(v)) out.fields[k] = describe(v[k]);
+          const r = v.renderer;
+          if (r) {
+            out.rendererFields = {};
+            for (const k of Object.keys(r)) out.rendererFields[k] = describe(r[k]);
+          }
+          const picker = document.querySelector('#viewer-container select');
+          out.pickerOptions = picker
+            ? [...picker.options].map((o) => o.value) : 'no select';
+          return out;
+        })()"""))
         if viewer["display"] in ("none", "missing"):
             failures.append(f"the 3D viewer is {viewer['display']} - a blank scene")
         if viewer["width"] < 2 or viewer["height"] < 2:
             failures.append("the viewer canvas has no drawing buffer"
                             f" ({viewer['width']}x{viewer['height']})")
+        # 🔴 AND DOES THE RENDERER ACTUALLY HOLD THE STRUCTURE? This is the
+        # assertion test/py2dmol-scaffold.test.js says belongs here - "the
+        # authority on what is required is tools/screen-in-page.py, which
+        # asserts at RUNTIME that window.py2dmol_viewers is non-empty and that
+        # THE SCENE DREW" - and what was actually asserted was the scene NOTE's
+        # text, which the page writes from its own bookkeeping whether or not a
+        # single atom reached the viewer. A visible, correctly sized, EMPTY
+        # canvas passed every check for weeks.
+        atoms = cdp.evaluate(ws, """(() => {
+          const reg = globalThis.py2dmol_viewers ?? {};
+          const r = reg[Object.keys(reg)[0]]?.renderer;
+          return { viewers: Object.keys(reg).length,
+                   coords: r?.coords?.length ?? -1,
+                   chains: r?.chains?.length ?? -1 };
+        })()""")
+        print("renderer holds:", atoms)
+        if atoms["viewers"] < 1:
+            failures.append("no py2Dmol viewer was built")
+        if atoms["coords"] < 1:
+            failures.append("the viewer holds no coordinates - the scene is"
+                            f" blank ({atoms})")
 
         if args.screenshot:
             shot = ws.call("Page.captureScreenshot",
