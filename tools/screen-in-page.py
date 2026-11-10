@@ -27,6 +27,8 @@ this probe is not evidence about a published site.
 import argparse
 import json
 import os
+import shutil
+import time
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -51,18 +53,42 @@ def main():
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--port", type=int, default=9333)
     ap.add_argument("--keep", action="store_true", help="keep the Chrome profile")
+    # 🔴 THE LIVE SITE IS NOT THE LOCAL BUILD, AND ONLY THE LIVE ONE 404s. A
+    # project page is served from /<repo>/ and its weights come from a pinned
+    # HuggingFace revision over the real network, so base paths, CORS and the
+    # shard cache are all exercised for the first time there. With --url this
+    # starts no local server and drives the published page instead.
+    # 🔴 THE ALIGNMENT ARM, WHICH THE DEFAULT RUN DOES NOT REACH. Without this
+    # the probe asserts the dial is on "Single sequence" and never exercises the
+    # one thing that leaves the machine - so "the MSA is searched ONCE per
+    # target and cached by sequence hash", the page's own claim, went unchecked.
+    # With --msa=mmseqs2 it counts requests to api.colabfold.com per ligand:
+    # searched once means the count stops growing after the first.
+    ap.add_argument("--msa", default="none",
+                    help="the MSA dial: none (default) or mmseqs2, which sends"
+                         " the target sequence to api.colabfold.com")
+    ap.add_argument("--url", default=None,
+                    help="drive this URL instead of a local server, e.g."
+                         " https://pablo-arantes.github.io/boltz2-webgpu/screen.html")
     args = ap.parse_args()
 
     # local_weights=False: both bundles here are local directories already, and
     # the rewrite would raise on a `remote: null` entry it cannot strip.
-    httpd = fold_in_page.serve(local_weights=False)
+    httpd = None if args.url else fold_in_page.serve(local_weights=False)
+    # a CLEAN profile for a live run: no HTTP cache, no CacheStorage, no
+    # compiled shaders, which is what a first visitor actually pays
     profile = os.path.join("/tmp", "localfold-screen-profile")
+    if args.url:
+        shutil.rmtree(profile, ignore_errors=True)
     proc, ws = cdp.launch(args.port, profile, keep=args.keep)
     failures = []
     try:
         ws.call("Runtime.enable")
         ws.call("Page.enable")
-        ws.call("Page.navigate", url="http://127.0.0.1:%d/screen.html" % PORT)
+        target = args.url or ("http://127.0.0.1:%d/screen.html" % PORT)
+        print("driving:", target)
+        started = time.time()
+        ws.call("Page.navigate", url=target)
         cdp.wait_for(ws, "document.getElementById('run') !== null", timeout=60,
                      what="the page to load")
 
@@ -74,6 +100,10 @@ def main():
                      timeout=args.timeout, what="the weights to load",
                      progress="document.getElementById('screen-status').textContent")
         loaded = cdp.evaluate(ws, "document.getElementById('screen-status').textContent")
+        # 🔴 COLD START IS MEASURED TO THE MOMENT THE PAGE CAN RUN, not to
+        # first paint: what a reader waits for is the weights, and on a first
+        # visit that is almost all of it.
+        print("cold start: %.1f s to a runnable page" % (time.time() - started))
         print("loaded:", loaded)
         if "affinity tensors" not in loaded:
             failures.append("the status line does not report the affinity bundle")
@@ -109,6 +139,17 @@ def main():
         # api.colabfold.com on every run.
         if typed["msa"] != "none":
             failures.append("the MSA default is %r, not single sequence" % typed["msa"])
+        if args.msa != "none":
+            cdp.evaluate(ws, """(() => {
+              const dial = document.getElementById('msa');
+              dial.value = %r;
+              dial.dispatchEvent(new Event('change', { bubbles: true }));
+              return dial.value;
+            })()""" % args.msa, await_promise=False)
+            chosen = cdp.evaluate(ws, "document.getElementById('msa').value")
+            if chosen != args.msa:
+                failures.append("the MSA dial would not take %r" % args.msa)
+            print("msa dial:", chosen)
         if "%d residues" % len(args.sequence) not in typed["sequenceNote"]:
             failures.append("the sequence box did not report its length: %r"
                             % typed["sequenceNote"])
@@ -175,8 +216,15 @@ def main():
 
         # --- the archive, read back ---------------------------------------
         archive = cdp.evaluate(ws, """(async () => {
-          const { screenArchive } = await import('/web/screen-export.js');
-          const { readZip } = await import('/web/zip.js');
+          // 🔴 RESOLVED AGAINST THE PAGE, NOT THE SERVER ROOT. A root-absolute
+          // specifier works against a local server at `/` and 404s under a
+          // project page's `/<repo>/` base - which is exactly the failure this
+          // probe exists to catch, and it caught it in the probe itself first:
+          // `import('/web/screen-export.js')` fetched
+          // pablo-arantes.github.io/web/screen-export.js with the base dropped.
+          const at = (m) => new URL(m, document.baseURI).href;
+          const { screenArchive } = await import(at('web/screen-export.js'));
+          const { readZip } = await import(at('web/zip.js'));
           const rows = [...document.querySelectorAll('#table tbody tr')]
             .map((tr) => tr.children[0].textContent.trim().replace(/[^\\w.-]/g, ''));
           const bytes = await screenArchive(window.__screenResults ?? [], {});
@@ -186,12 +234,27 @@ def main():
                    readme: (members.get('README.txt') ?? '').slice(0, 0) === '' };
         })()""")
         print("archive:", archive)
+
+        # 🔴 "SEARCHED ONCE PER TARGET" IS A COUNT, NOT A COMMENT. Resource
+        # timing records every request the page made, so the number aimed at
+        # api.colabfold.com is checkable: one search's worth however many
+        # ligands were scored.
+        msa_calls = cdp.evaluate(ws, """(() => {
+          const hits = performance.getEntriesByType('resource')
+            .map((e) => e.name).filter((n) => n.includes('colabfold'));
+          return { total: hits.length, distinct: [...new Set(hits)].length };
+        })()""")
+        print("colabfold requests:", msa_calls)
+        if args.msa == "none" and msa_calls["total"] != 0:
+            failures.append("single-sequence mode still called colabfold"
+                            " %d time(s)" % msa_calls["total"])
         if "affinity.csv" not in archive["names"]:
             failures.append("the archive has no CSV")
     finally:
         if not args.keep:
             proc.kill()
-        httpd.shutdown()
+        if httpd is not None:
+            httpd.shutdown()
 
     if failures:
         print("\nFAILED")

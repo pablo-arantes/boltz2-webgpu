@@ -66,7 +66,11 @@ jobs:
       # relative; this fails if that ever stops being true.
       - name: Refuse root-absolute references
         run: |
-          if grep -rnoE '(src|href)="/[^/"]|import\("/|from "/|fetch\("/|new Worker\("/' \
+          # 🔴 BOTH QUOTE STYLES. The first version of this guard matched only
+          # double quotes and so missed `import('/web/screen-export.js')` - a
+          # single-quoted root-absolute import, which is the exact shape that
+          # 404s under /<repo>/. Found by the live run, in the test harness.
+          if grep -rnoE "(src|href)=[\"']/[^/\"']|import\([\"']/|from [\"']/|fetch\([\"']/|new Worker\([\"']/" \
                dist --include='*.html' --include='*.js'; then
             echo "::error::dist/ contains root-absolute references; they 404 under /<repo>/."
             exit 1
