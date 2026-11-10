@@ -37,7 +37,18 @@ __pycache__/
 # is the part that matters: a reader cannot tell what is the project and what
 # is somebody's afternoon. One directory, one rule, and the checkers fetch from
 # it by path.
-/oracle-dumps/
+# 🔴 THE CONTENTS, NOT THE DIRECTORY: git never descends into an excluded
+# DIRECTORY, so a negation below it can never take effect. `/oracle-dumps/`
+# made the next line a no-op.
+/oracle-dumps/*
+# 🔴 ...EXCEPT THE RDKit RANKING CORPUS, WHICH IS A FIXTURE AND NOT A DUMP OF
+# TENSORS. 784 KB of RDKit's own canonical ranks over 74 molecules, and the only
+# input `test:canonical-rank` and `test:canonical-names` need. Ignored with the
+# rest it made both gates dead on every machine without RDKit installed - which
+# is every CI runner - and this tree's own complaint is that "a checker nobody
+# can run is a checker nobody runs". Regenerate with
+# `tools/oracle/dump_rdkit_canon_ranks.py` under a python that has RDKit.
+!/oracle-dumps/rdkit-canon-ranks.json
 
 # The AF3 trunk export, written by tools/export_af3_model.py: the float32 master
 # and tools/quantize_model.py's int8 output.
