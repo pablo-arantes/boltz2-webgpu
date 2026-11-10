@@ -440,9 +440,22 @@ function mergeExplicitHydrogens(atoms, bonds, writtenNeighbours) {
     if (neighbours[index].length !== 1) return;
     const host = neighbours[index][0].atom;
     if (atoms[host].symbol === "H") return;
-    // A charged or mapped hydrogen is being singled out deliberately; folding
-    // it into a count would throw that away silently.
+    // A hydrogen singled out by a charge, an ISOTOPE or an atom map is being
+    // distinguished deliberately, and folding it into a count throws that away
+    // silently. These are RDKit's own `removeHs` exceptions, and the comment
+    // here claimed the map one while the code tested only the charge.
+    //
+    // 🔴 THE ISOTOPE IS WHY `[2H]` WAS A BUG AND NOT A STYLE CHOICE. A
+    // deuterated ligand came out as the protiated one: `[2H]C([2H])([2H])O`
+    // parsed to TWO atoms, a carbon carrying three plain hydrogens, where
+    // RDKit keeps five - H2, C, H2, H2, O. That is a different molecule in
+    // `ref_element`, in the atom count and in every per-atom feature, for
+    // every model family, not merely a different atom NAME. Found by
+    // `test:canonical-names`, which compares this port's whole parse against
+    // RDKit's atom table rather than just its graph.
     if (atom.charge !== 0) return;
+    if ((atom.isotope ?? 0) !== 0) return;
+    if ((atom.mapClass ?? 0) !== 0) return;
     atoms[host].hydrogens = (atoms[host].hydrogens ?? 0) + 1;
     drop.add(index);
   });

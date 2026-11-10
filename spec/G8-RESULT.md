@@ -913,18 +913,38 @@ own dumped graph, so neither could appear there.
 🔴 **AND THE TWO FAILURES ARE NOT RANKING FAULTS - THEY ARE PARSE-LEVEL, AND
 BOTH ARE WORSE THAN A NAME.** Neither is fixed and neither is hidden:
 
-- **`deuterium` (`[2H]C([2H])([2H])O`).** This port folds a bracket hydrogen
-  into its neighbour's hydrogen COUNT, so the molecule has a different atom
-  table from RDKit's - 3 atoms differ in `z`, 3 in `isotope`, 6 in `nbrIds` -
-  and **the isotope is lost entirely**. A deuterated ligand is featurised as
-  the protiated one, which is wrong in `ref_element` and in the atom count, not
-  merely in a name.
-- **`porphine`.** This port marks the whole macrocycle aromatic where RDKit's
-  aromaticity model leaves the inter-pyrrole bonds Kekulé: 14 atoms' bond types
-  differ, every per-atom field agrees, and the ranking of the molecule we built
-  is correct for the molecule we built. `bondholder::compare` ranks the bond
-  TYPE before the neighbour's class, so one differently-perceived ring reorders
-  every atom around it.
+- **`deuterium` — FIXED 2026-11-10.** This port folded a bracket hydrogen into
+  its neighbour's hydrogen COUNT, so `[2H]C([2H])([2H])O` parsed to TWO atoms -
+  a carbon carrying three plain hydrogens - where RDKit keeps five
+  (`H2 C H2 H2 O`), and **the isotope was lost entirely**: a deuterated ligand
+  featurised as the protiated one, wrong in `ref_element` and in the atom count
+  for every model family, not merely in a name.
+
+  `mergeExplicitHydrogens` now keeps a hydrogen singled out by an **isotope** or
+  an **atom map**, which is what RDKit's `removeHs` keeps - and 🔴 that
+  function's own comment already said "a charged or mapped hydrogen is being
+  singled out deliberately" while the code tested only the charge. The rule was
+  written down correctly and implemented halfway. Every field category in
+  `test:canonical-names` is now 0 differing, plain `[H]` still folds as RDKit
+  folds it, and the gate DEMANDED its declaration be deleted rather than
+  carried - it fails when a pinned molecule comes good.
+- **`porphine` — STILL OPEN, cause now exact.** This port TRUSTS the SMILES'
+  lower case; RDKit RE-PERCEIVES aromaticity with its own ring model and
+  demotes two of porphine's four meso bridges: atoms **0, 1, 10 and 11** become
+  non-aromatic and their six bonds ordinary (2,1,1,2,1,1), where this port has
+  all twenty carbons aromatic. 8 atoms' bond types differ, every per-atom field
+  agrees, and the ranking of the molecule this port builds is correct FOR that
+  molecule.
+
+  🔴 **IT IS NOT A PATCH, WHICH IS WHY IT IS STILL OPEN.** Closing it means
+  porting that model: kekulise, then electron-count each ring AND each fused
+  ring SYSTEM with RDKit's per-atom contributions. Aromaticity feeds the
+  bond-order plane (whose index was off by one until today), the conformer's
+  planarity rules and `test:smiles-batch`'s exact agreement with AF3 across
+  eight families - so a half-model that fixed porphine while quietly moving
+  another molecule would be worse than a declared gap.
+  `bondholder::compare` ranks the bond TYPE before the neighbour's class, so
+  one differently-perceived ring reorders every atom around it.
 
 Both affect every family's features for those molecules, not just boltz2's
 names, so they are recorded here and left for their own change.

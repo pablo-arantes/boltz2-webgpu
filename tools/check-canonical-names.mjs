@@ -144,10 +144,16 @@ if (failures.length) {
 // gate too, so the exclusion has to be deleted rather than quietly carried.
 // spec/G8-RESULT.md states what each one is.
 const REPORTED = new Map([
-  ["deuterium", "a bracket [2H] is folded into its neighbour's hydrogen COUNT,"
-    + " so the atom table and the isotope differ from RDKit's"],
-  ["porphine", "the macrocycle is perceived aromatic where RDKit's model leaves"
-    + " the inter-pyrrole bonds Kekule, so 14 atoms' bond TYPES differ"],
+  ["porphine", "this port TRUSTS the SMILES' lower case; RDKit RE-PERCEIVES"
+    + " aromaticity with its own ring model and demotes two of the four meso"
+    + " bridges - atoms 0, 1, 10, 11 become non-aromatic and their six bonds"
+    + " ordinary (2,1,1,2,1,1). Closing it needs that model ported, not a"
+    + " patch: kekulise, then electron-count each ring AND each fused ring"
+    + " system with RDKit's per-atom contributions. The ranking of the molecule"
+    + " this port builds is correct FOR that molecule - every per-atom field"
+    + " agrees and only the bond TYPES differ - and `bondholder::compare` ranks"
+    + " the type before the neighbour's class, so one ring perceived"
+    + " differently reorders every atom around it."],
 ]);
 const unexpected = [...nameFailed].filter((name) => !REPORTED.has(name));
 const cured = [...REPORTED.keys()].filter((name) => !nameFailed.has(name));
