@@ -1,19 +1,16 @@
 # GitHub Pages deploy for the screening page.
 #
-# 🔴 THE `push` TRIGGER IS DELIBERATELY ABSENT UNTIL THE AFFINITY BUNDLE IS
-# PUBLISHED. `screen.html` opens the `boltz2-affinity` bundle, whose `remote` is
-# null in shared/bundles/manifests/index.js, and tools/build_site.py drops the
-# page rather than ship one that 404s on shard zero for every visitor. Deploying
-# now would put up a site with no screening page - the deliverable missing - so
-# the workflow runs only when asked, and the job below REFUSES rather than
-# deploying a site in that state. Add
-#
-#   push:
-#     branches: [main]
-#
-# in the same commit that pins the bundle's revision.
+# 🔴 THE TWO GUARDS BELOW ARE THE POINT OF THIS WORKFLOW, NOT THE DEPLOY. It
+# refuses to publish a site with no `screen.html` - which is what happens
+# whenever the `boltz2-affinity` bundle's `remote` is null, because
+# tools/build_site.py drops an unservable page rather than ship one that 404s
+# on shard zero - and it refuses any root-absolute reference, which is the usual
+# reason a fork 404s under a project page's /<repo>/ base path. Both were
+# watched failing before being trusted.
 name: Pages
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:

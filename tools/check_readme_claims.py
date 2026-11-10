@@ -67,7 +67,16 @@ claim("Prohibited Use Policy" in t and "Do not redistribute those" in t,
 # the registry entry the README promises
 reg = (root / "shared/bundles/manifests/index.js").read_text()
 claim('"boltz2-affinity"' in reg, "MODEL_BUNDLES has boltz2-affinity")
-claim("remote: null" in reg, "its remote is null, as the README says")
+# 🔴 PINNED TO A SHA, AND THE CLAIM SAYS SO RATHER THAN JUST "HAS A REMOTE".
+# `resolve/main/` would satisfy a looser test and is exactly what the brief
+# forbids: it re-points on any re-upload, so a visitor's download could change
+# without a commit here.
+import re as _re
+_aff = _re.search(r'"boltz2-affinity":\s*\{.*?\n  \},', reg, _re.DOTALL)
+_remote = _re.search(r'remote:\s*"([^"]+)"', _aff.group(0) if _aff else "")
+claim(_remote is not None, "boltz2-affinity has a remote")
+claim(bool(_remote) and _re.search(r"/resolve/[0-9a-f]{40}/", _remote.group(1)) is not None,
+      "its remote is pinned to a 40-character revision, not a branch")
 
 affinity = root / "refs/export/boltz2-affinity-int5/manifest.json"
 if not affinity.exists():

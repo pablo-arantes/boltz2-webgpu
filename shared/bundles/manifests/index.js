@@ -423,17 +423,23 @@ export const MODEL_BUNDLES = {
   // gets the pinned remote, the CacheStorage shard cache and the download dial
   // with no new code, exactly as ESM-C does for the PLM towers.
   //
-  // 🔴 `remote: null` MEANS THIS BUNDLE IS NOT PUBLISHED YET, AND THE SITE
-  // BUILD KNOWS. docs/ records what happens when a page offers a family whose
-  // remote is null: `bundleBaseUrl` falls back to `directory`, a local export
-  // the build deliberately never copies, and the option is broken the moment
-  // it ships. build_site.py drops an unservable option for exactly this
-  // reason. Publishing the export and pinning its revision here is the only
-  // change needed - the registry decides.
+  // 🔴 PINNED TO A REVISION, NOT TO A BRANCH, and that is the whole point of
+  // the URL shape: `resolve/<sha>/` can never change under a visitor, where
+  // `resolve/main/` would re-point the moment anything is re-uploaded. The
+  // bundle is 6.51 MiB in eight shards plus the manifest, served with
+  // `access-control-allow-origin` echoed back - verified by fetching it with a
+  // `https://pablo-arantes.github.io` Origin and byte-comparing the result
+  // against the local export, because a bundle that uploads is not yet a
+  // bundle a BROWSER can read.
+  //
+  // While this was null, `bundleBaseUrl` fell back to `directory` - a local
+  // export the build deliberately never copies - and build_site.py dropped
+  // screen.html rather than ship a page that 404s on shard zero. That rule
+  // stays: it is what will catch the next unpublished bundle.
   "boltz2-affinity": {
     model: "boltz2-affinity",
     directory: "./model-boltz2-affinity-int5/",
-    remote: null,
+    remote: "https://huggingface.co/pabloarantes/boltz2-webgpu-weights/resolve/adf393c79ce5ab949ae1d908995c7b49ec8f73b8/boltz2-affinity-int5/",
     release: "boltz2-affinity-int5",
     variable: "LOCALFOLD_INCLUDE_BOLTZ2_AFFINITY",
     companion: undefined,

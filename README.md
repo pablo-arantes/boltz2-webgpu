@@ -38,10 +38,13 @@ python3 tools/serve.py           # or any static server; the page is static
 ```
 
 It needs a browser with WebGPU (current Chrome, Edge, Safari or Firefox) and
-two weight bundles. The structure bundle is fetched from the pinned Hugging
-Face revision in `MODEL_BUNDLES` and cached in CacheStorage; **the affinity
-bundle is not published yet**, so for now it is a local export symlinked into
-the tree:
+two weight bundles, both fetched from a pinned Hugging Face revision in
+`MODEL_BUNDLES` and cached in CacheStorage - nothing to install and no weight
+in this repository. The structure bundle is 365 MiB; the affinity bundle is
+6.51 MiB in eight shards, fetched only when a reader asks for an affinity.
+
+To rebuild the affinity export yourself rather than fetch it - which is how it
+was produced, and what `tools/g0_verify.py` checks against the checkpoint:
 
 ```bash
 # the export, if you do not already have it: 520 tensors read straight out of
@@ -387,31 +390,42 @@ precision the data does not have.
 
 ## Publishing
 
-The site builds and deploys with one exception, and it is the screening page
-itself.
+The site builds and deploys from `main` through
+`.github/workflows/pages.yml`.
 
-- 🔴 **`screen.html` IS DROPPED FROM `dist/` UNTIL THE AFFINITY BUNDLE IS
-  PUBLISHED, AND THE BUILD SAYS SO EVERY TIME.** The page opens the
-  `boltz2-affinity` bundle through `openStore`, whose `remote` is null, so
-  `bundleBaseUrl` would fall back to `./model-boltz2-affinity-int5/` - a local
-  export the build deliberately never copies - and every visitor would 404 on
-  shard zero. `tools/build_site.py` now drops the page and prints what is
-  missing and how to fix it, which is the same rule it already applied to an
-  unservable model `<option>`, one control further out. Verified both ways:
-  with a remote pinned the page ships and nothing is dropped.
+- 🔴 **THE DEPLOY REFUSES A SITE WITH NO SCREENING PAGE, WHICH IS THE ONE
+  FAILURE THAT WOULD LOOK LIKE SUCCESS.** `screen.html` opens the
+  `boltz2-affinity` bundle through `openStore`; while that bundle's `remote`
+  was null, `bundleBaseUrl` fell back to `./model-boltz2-affinity-int5/` - a
+  local export the build deliberately never copies - and every visitor would
+  have 404'd on shard zero. `tools/build_site.py` drops an unservable page and
+  says so, the same rule it already applied to an unservable model `<option>`
+  one control further out, and the workflow turns that into a failed build.
+  Watched failing both ways before being trusted: with the remote null the page
+  is dropped and the deploy refuses, with it pinned the page ships and nothing
+  is dropped.
 
-  The artefact is ready and checked: **6.51 MiB in 9 files** (8 shards plus the
-  manifest), `.gitignore`d so no weight enters git, and
+- 🔴 **AND IT REFUSES ANY ROOT-ABSOLUTE REFERENCE**, because a project page is
+  served from `/<repo>/` and a single `/`-rooted asset, worker, WASM or
+  manifest path is the usual reason a fork 404s on Pages. `dist/` is entirely
+  relative; the workflow fails if that stops being true, so no base-path
+  rewriting step is needed and none is guessed at.
+
+- 🔴 **THE AFFINITY BUNDLE IS PINNED TO A REVISION, NOT A BRANCH.** 6.51 MiB in
+  eight shards plus the manifest at
+  `pabloarantes/boltz2-webgpu-weights@adf393c7`, fetched only when a reader
+  asks for an affinity. `resolve/<sha>/` cannot change under a visitor where
+  `resolve/main/` would re-point on any re-upload. Verified as a BROWSER sees
+  it rather than as an upload tool reports it: fetched with a
+  `https://pablo-arantes.github.io` Origin, `access-control-allow-origin`
+  echoed back on both the redirect and the file, and the bytes compared against
+  the local export - manifest and shard zero identical. `python3
+  tools/check_remote_bundle.py boltz2-affinity` finds all 8 shards.
+
+  The export itself is checked against the float32 one by
   `tools/check-affinity-quantisation.py --f32=model-boltz2-affinity-f32
-  --int5=model-boltz2-affinity-int5` passes - norms and output projections
-  byte-exact, the large projections at 3.88e-2, which is int5's own level.
-
-  What is left is one action this repository cannot take for you, because it
-  writes to an account: upload `model-boltz2-affinity-int5/` to the
-  HuggingFace repo, then pin that revision's URL as `remote` on the
-  `boltz2-affinity` entry in `shared/bundles/manifests/index.js` and confirm it
-  with `python3 tools/check_remote_bundle.py boltz2-affinity --revision <sha>`.
-  The registry decides: no other file changes.
+  --int5=model-boltz2-affinity-int5`: norms and output projections byte-exact,
+  the large projections at 3.88e-2, which is int5's own level.
 
 - 🔴 **NO WEIGHTS ARE TRACKED, AND ONE OVERSIZED FILE IS - DECLARED, NOT
   HIDDEN.** `npm run test:sizes` (`tools/check_repo_sizes.py`) fails on any

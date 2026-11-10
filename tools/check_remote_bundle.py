@@ -53,7 +53,14 @@ def bundle_base(family: str) -> str:
     current = None
     fields: dict[str, dict[str, str]] = {}
     for line in index.splitlines():
-        opened = re.match(r"^  (\w+): \{$", line)
+        # 🔴 A FAMILY NAME WITH A HYPHEN IS QUOTED IN JS, and this pattern used
+        # to require a bare identifier - so every hyphenated bundle
+        # (`"boltz2-affinity"`, and any later one) was invisible to this
+        # checker and it refused with "no bundle named ...". build_site.py's
+        # `remote_families` already allowed the quotes; this was the odd one
+        # out, which is this repository's standing complaint about a convention
+        # written down twice.
+        opened = re.match(r'^  "?([\w-]+)"?: \{$', line)
         if opened:
             current = opened.group(1)
             fields[current] = {}
