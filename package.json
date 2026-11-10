@@ -78,6 +78,7 @@
     "test:sizes": "python3 -I tools/check_repo_sizes.py",
     "test:canonical-rank": "node tools/check-canonical-rank.mjs",
     "test:canonical-names": "node tools/check-canonical-names.mjs",
+    "test:aromaticity": "node tools/check-aromaticity.mjs",
     "test:smiles-batch": "node tools/check-smiles-batch.mjs",
     "test:smiles-path": "node tools/check-smiles-path.mjs",
     "//test:affinity-mw": "G4 - does this port's molecular weight agree with RDKit's, which is the one upstream computes affinity_mw with? The weight feeds Boltz-2's molecular-weight correction, so it reaches a log10(IC50) a reader ranks on. \ud83d\udd34 IT FOUND THE TABLE WRITTEN FROM IUPAC 2021 WHERE RDKit SHIPS AN OLDER ONE - 51 of 86 elements disagreed, and the correction's three coefficients were FITTED against RDKit's values, so being more correct than them is the bug. Needs the dump: python3 tools/oracle/dump_rdkit_molwt.py",

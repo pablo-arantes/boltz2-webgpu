@@ -116,6 +116,22 @@ CORPUS = [
     ("aziridine", "C1CN1"),
     ("cubane", "C1(C2C3C14C5C2C3C45)"),                   # five rings, rank 5, all strained
     ("coronene_frag", "c1cc2ccc3ccc4ccc5ccc6ccc1c1c2c3c4c5c61"),   # seven fused aromatics
+    # 🔴 THE THREE AROMATICITY CASES THE REST OF THIS CORPUS CANNOT SEE. Every
+    # other aromatic molecule here is written in LOWER CASE and has rings that
+    # each pass Huckel alone, so a parser that simply trusted the input's case
+    # scored 73/74 and a perception model that only ever tried SINGLE rings
+    # would score 74/74 - both wrong, neither visible.
+    #   - kekule_benzene: perception from integer orders. Trusting the case
+    #     marks this NON-aromatic where RDKit perceives a ring.
+    #   - azulene: a 5-ring and a 7-ring sharing exactly one bond. Each FAILS
+    #     Huckel alone and their union passes, so it is the only case here that
+    #     needs a two-ring combination.
+    #   - tropone: the exocyclic C=O steals the ring carbon's electron
+    #     (`VacantElectronDonorType`), so the oxygen is out and the ring is
+    #     still aromatic - the rule no other molecule here exercises.
+    ("kekule_benzene", "C1=CC=CC=C1"),
+    ("azulene", "c1ccc2cccc2cc1"),
+    ("tropone", "O=C1C=CC=CC=C1"),
     ("cyclopentadienide", "c1ccc[cH-]1"),                 # an aromatic carbanion
     ("hexadecane", "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"),     # 30 atoms, all rotatable
     ("macrocycle_16", "C1CCCCCCCCCCCCCCC1"),              # a ring the polygon rule skips

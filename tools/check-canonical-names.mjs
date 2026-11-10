@@ -143,17 +143,13 @@ if (failures.length) {
 // 🔴 AND EACH IS PINNED, NOT EXCUSED: a molecule that comes GOOD fails this
 // gate too, so the exclusion has to be deleted rather than quietly carried.
 // spec/G8-RESULT.md states what each one is.
+// 🔴 EMPTY, AND THAT IS THE POINT. Both entries that lived here were closed
+// the same day - the isotopic hydrogen by honouring RDKit's `removeHs`
+// exceptions, porphine by porting RDKit's aromaticity model - and each time it
+// was THIS GATE that demanded the declaration be deleted rather than carried,
+// by failing when the molecule came good. Add an entry only with the reason,
+// never a pattern.
 const REPORTED = new Map([
-  ["porphine", "this port TRUSTS the SMILES' lower case; RDKit RE-PERCEIVES"
-    + " aromaticity with its own ring model and demotes two of the four meso"
-    + " bridges - atoms 0, 1, 10, 11 become non-aromatic and their six bonds"
-    + " ordinary (2,1,1,2,1,1). Closing it needs that model ported, not a"
-    + " patch: kekulise, then electron-count each ring AND each fused ring"
-    + " system with RDKit's per-atom contributions. The ranking of the molecule"
-    + " this port builds is correct FOR that molecule - every per-atom field"
-    + " agrees and only the bond TYPES differ - and `bondholder::compare` ranks"
-    + " the type before the neighbour's class, so one ring perceived"
-    + " differently reorders every atom around it."],
 ]);
 const unexpected = [...nameFailed].filter((name) => !REPORTED.has(name));
 const cured = [...REPORTED.keys()].filter((name) => !nameFailed.has(name));

@@ -1,4 +1,34 @@
-# Porting RDKit's aromaticity model — the algorithm, and the one open question
+# RDKit's aromaticity model, ported — DONE (2026-11-10)
+
+`shared/chem/aromaticity.js`, called from `parseSmiles` after kekulisation
+and the implicit hydrogens. **77/77 on atom flags and 77/77 on bond flags**
+against RDKit 2025.03.5 (`npm run test:aromaticity`), and the canonical-name
+gate went 73/74 to **77/77 with nothing declared**.
+
+## What it took, beyond the algorithm below
+
+Three faults, two of them mine and one a rule I had not read:
+
+1. 🔴 **Hydrogens counted twice.** RDKit's `getValence(EXPLICIT)` does NOT
+   include an implicit hydrogen; every hydrogen in this parser is a count, so
+   adding it to a sum that already held it put benzene's carbons at valence 5
+   against an allowed 4 and made EVERY aromatic ring non-aromatic.
+2. 🔴 **`atom.z` is undefined on a parsed graph** — the parser calls it
+   `element` and only the ranker's adapter calls it `z`. A silent failure,
+   not an error: `DEFAULT_VALENCE.get(undefined)` is undefined, so every atom
+   looked univalent and nothing was aromatic. It read 49/74, and 49 is just
+   the number of molecules with no aromatic ring to get wrong.
+3. 🔴 **Two rings are neighbours only if they share EXACTLY ONE bond.**
+   `makeRingNeighborMap(brings, neighMap, 24, 1)` passes `maxOverlapSize = 1`
+   and tests `inter.size() > 0 && inter.size() <= maxOverlapSize`. Each of
+   porphine's pyrroles shares TWO bonds with the 16-ring, so every ring there
+   is its own fused system and only single rings are ever tried. With "shares
+   at least one bond" the five rings became one system, a two-ring combination
+   passed, and porphine came out aromatic where RDKit leaves four carbons out.
+   This is the rule the whole molecule turns on, and the gate is watched
+   failing on it.
+
+## The original plan and the open question it had to answer
 
 `test:canonical-names` is 73/74. The last molecule is **porphine**, and the
 cause is exact: this port TRUSTS the SMILES' lower case, where RDKit

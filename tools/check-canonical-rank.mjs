@@ -151,8 +151,16 @@ if (result.exact !== result.total) {
   console.log(`\n${result.failures.length} molecules disagree`
     + (has("verbose") ? "" : "   (--verbose to see them)"));
 }
-// 🔴 NO EXIT CODE GATE UNTIL IT PASSES. A red gate that has never been green
-// is a gate nobody can distinguish from a broken one; this reports until the
-// decision to ship it is taken, and the number is the decision.
-console.log(`\nverdict: ${result.exact === result.total
-  ? "74/74 - ship it" : "short of 74/74 - see the go/no-go in spec/G8-RESULT.md"}`);
+// 🔴 IT ENFORCES NOW, BECAUSE IT HAS BEEN GREEN. The note that used to sit
+// here said "no exit code gate until it passes - a red gate that has never
+// been green is a gate nobody can distinguish from a broken one", which was
+// right while the ranking was being built. It reached exact agreement on the
+// whole corpus, so from here a disagreement is a REGRESSION and has to fail.
+// 🔴 AND THE COUNT IS READ FROM THE DUMP, never typed: the corpus grew from 74
+// to 77 when the aromaticity cases were added, and a hardcoded 74 would have
+// gone on reporting "74/74 - ship it" over a 77-molecule corpus.
+const total = dump.records.length;
+console.log(`\nverdict: ${result.exact}/${total}`
+  + (result.exact === total ? " - ship it"
+    : " - see the go/no-go in spec/G8-RESULT.md"));
+process.exit(result.exact === total && result.partition === total ? 0 : 1);

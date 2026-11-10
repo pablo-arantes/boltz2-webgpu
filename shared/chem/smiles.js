@@ -26,6 +26,8 @@
 
 import { ELEMENT_SYMBOLS } from "../af3/featurise/ccd-component.js";
 import { delocalizeCharges, kekulize } from "./kekulize.js";
+import { perceiveAromaticity } from "./aromaticity.js";
+import { smallestRings } from "./rings.js";
 
 /**
  * The organic subset: these may appear outside brackets and take their
@@ -279,6 +281,19 @@ export function parseSmiles(text) {
   // and wrong for every aromatic nitrogen that carries a substituent.
   kekulize({ atoms, bonds });
   fillImplicitHydrogens(atoms, bonds);
+  // 🔴 AND THEN AROMATICITY IS **PERCEIVED**, NOT READ OFF THE INPUT'S CASE.
+  // RDKit's pipeline is parse -> sanitise -> kekulise -> setAromaticity, and
+  // trusting the lower case was wrong in both directions: porphine came out
+  // with all twenty carbons aromatic where RDKit leaves four out, and a
+  // Kekule-written `C1=CC=CC=C1` came out NON-aromatic where RDKit perceives a
+  // ring. It runs after the hydrogens because a donor type counts them
+  // (pyrrole's N-H gives two electrons, pyridine's N one).
+  //
+  // 🔴 THE IMPORT CYCLE IS DELIBERATE AND SAFE: rings.js reads `adjacency`
+  // from this file, so this is smiles -> aromaticity -> rings -> smiles. Every
+  // call is inside a function body rather than at module evaluation, which is
+  // what makes it work; do not move any of them to the top level.
+  perceiveAromaticity({ atoms, bonds }, smallestRings({ atoms, bonds }));
   // ...and only then the resonance, which needs the hydrogens to know that an
   // -OH is not part of a carboxylate. It writes `geometryOrder`, never `order`.
   delocalizeCharges({ atoms, bonds });
