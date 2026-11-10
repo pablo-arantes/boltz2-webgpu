@@ -92,46 +92,74 @@ rings are not connected (`checkFused`). For a combination:
     a bond aromatic only where it appears **once** across the combination's
     rings, so interior fusing bonds stay non-aromatic
 
-## 🔴 THE OPEN QUESTION, AND IT MUST BE ANSWERED BEFORE A LINE IS WRITTEN
+## ✅ THE QUESTION IS ANSWERED — measured, not reasoned (2026-11-10)
 
-By the above, porphine's 16-membered macrocycle should be perceived AROMATIC,
-and RDKit does not perceive it so. Worked through: no size limit applies, all
-16 atoms pass `isAtomCandForArom`, and the electron sum is
+`refs/canon-trace/arom.cpp` drives RDKit's own perception and
+`Aromaticity.cpp`'s `aromaticityHelper` prints its rings, its donor types and
+every combination it tries, under `AROM_TRACE=1`. For porphine:
 
-    2 NH nitrogens x 2  +  2 pyridine-type N x 1  +  12 carbons x 1  =  18
+```
+SRINGS 5 (all), 5 candidate
+  ring 0 size  5: 0 1 2 20 19
+  ring 1 size 16: 3 4 23 7 8 9 22 12 13 14 21 17 18 19 20 2
+  ring 2 size  5: 5 4 23 7 6
+  ring 3 size  5: 10 9 22 12 11
+  ring 4 size  5: 15 14 21 17 16
+TRY rings 0 (sizes  5) -> no
+TRY rings 1 (sizes 16) -> AROMATIC
+TRY rings 2 (sizes  5) -> AROMATIC
+TRY rings 3 (sizes  5) -> no
+TRY rings 4 (sizes  5) -> AROMATIC
+```
 
-with (18 - 2) % 4 == 0, which `applyHuckel` accepts. RDKit's own answer
-(oracle-dumps/rdkit-canon-ranks.json) is that atoms 0, 1, 10, 11 are NOT
-aromatic, i.e. only the four pyrroles are, and the macrocycle is not.
+All 20 carbons are `type=1 elecs=[1,1]`; the nitrogens split **2, 1, 2, 1** —
+N21 and N23 are the `[nH]` pair at `[2,2]`, N20 and N22 are `[1,1]`.
 
-So an assumption about the model's INPUTS is wrong, and there are two
-candidates:
+| ring | electrons | Huckel |
+|---|---|---|
+| 0 `0 1 2 19 20` | 4xC + N20(1) = **5** | `rup < 6` and `!= 2` → no |
+| 1, the 16-ring | 12xC + 1+2+1+2 = **18** | (18-2)%4 == 0 → **aromatic** |
+| 2 `4 5 6 7 23` | 4xC + N23(2) = **6** | aromatic |
+| 3 `9 10 11 12 22` | 4xC + N22(1) = **5** | no |
+| 4 `14 15 16 17 21` | 4xC + N21(2) = **6** | aromatic |
 
-  1. `MolOps::symmetrizeSSSR` does not hand the helper that 16-membered ring at
-     all. Porphine has 5 SSSR rings (28 bonds - 24 atoms + 1); the four
-     pyrroles are four of them, and the fifth may not be the ring assumed here.
-  2. An alpha or meso carbon's donor type is not `One` as derived.
+🔴 **THE ARITHMETIC IN THE SECTION ABOVE WAS RIGHT AND THE RING SET WAS WRONG.**
+The macrocycle really does carry 18 electrons and really is aromatic. What was
+wrong was calling atoms 0, 1, 10, 11 "meso bridges in the macrocycle": the SSSR
+puts them in two FIVE-membered rings that fail on 5 electrons, and the
+16-membered ring does not contain them at all. They are non-aromatic because
+every ring they belong to failed - nothing to do with fusing, and no
+combination larger than one ring is ever tried here (`doneBonds` covers the
+system after the first pass).
 
-🔴 **ANSWER IT BY DUMPING, NOT BY REASONING** — which is what settled the
-canonical ranking after two sessions of argument failed. The RDKit build in
-`refs/rdkit-build` is already configured, and `refs/canon-trace/trace.cpp` is a
-working driver that links against it. Print, for porphine:
+**This is why the port was not written on the reasoning alone.** The conclusion
+"the macrocycle is not aromatic" was false, and a model built to reproduce it
+would have been wrong for porphine and wrong for every other molecule too.
 
-  * `mol.getRingInfo()->atomRings()` after sanitisation — the actual `srings`
-  * `edon[i]` and `acands[i]` for every atom, from inside `aromaticityHelper`
-  * every `curRs` combination tried and whether `applyHuckel` accepted it
+### And our own SSSR already agrees, which was the real risk
 
-Three `std::cerr` lines in `aromaticityHelper` give all of it. Until those
-numbers exist, any port rests on the contradiction above — and a model that
-fixed porphine while quietly moving one of the other 73 would be worse than the
-declared gap, because aromaticity feeds the bond-order plane, the conformer's
-planarity rules and `test:smiles-batch`'s exact agreement with AF3 across eight
-families.
+Perception is only as good as the rings it is handed, and
+`shared/chem/rings.js`'s `smallestRings` returns RDKit's exact five for
+porphine - the four 5-rings and the 16-ring, same members. So the hard
+dependency holds on the hardest case in the corpus.
 
-## The gate to build against
+## What is left to write
 
-`tools/check-canonical-names.mjs` already compares every per-atom field AND
-every bond type against RDKit over all 74 molecules, so it is the oracle: a
-correct model keeps 73 and takes porphine to 74. Extend it with Kekulé-written
-inputs (`C1=CC=CC=C1` beside `c1ccccc1`) before trusting the model, because the
-present corpus cannot see a perception that is right only for lower case.
+1. `countAtomElec` and `getAtomDonorTypeArom` per the sections above, needing a
+   small periodic table: default valence and outer electrons for H, B, C, N, O,
+   F, Si, P, S, Cl, Se, Br, I, plus an electronegativity comparison for the
+   "exocyclic bond steals the electron" rule.
+2. `isAtomCandForArom`, including the `defaultValence(Z - charge)` quirk.
+3. `applyHuckel` on electron BOUNDS.
+4. 🔴 **The fused search, which this corpus CANNOT justify skipping.** Every
+   aromatic ring in the 74 passes on its own, so a size-1-only implementation
+   would score 74/74 and still be wrong: azulene's fused 5+7 system has two
+   rings that each fail and a union that passes. Add azulene (`c1ccc2cccc2c1`)
+   and a Kekule-written benzene to the corpus BEFORE trusting the model, or the
+   gate cannot see either gap.
+5. Call it from the parser after `kekulize`, replacing the trust-the-input
+   behaviour, and set both `atom.aromatic` and `bond.aromatic` from it.
+
+The gate is `tools/check-canonical-names.mjs`, which already compares every
+per-atom field and every bond type against RDKit over all 74: a correct model
+keeps 73 and takes porphine to 74.
