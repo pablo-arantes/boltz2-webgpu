@@ -253,104 +253,83 @@ a single-quoted `import('/...')` would have passed the check written to stop
 exactly that. Both fixed, and `dist/` is clean under the wider pattern.
 
 
-## 🔴 OPEN: the screening page's 3D scene is blank (2026-11-10)
+## The screening page's 3D scene was blank — FIXED (2026-11-10)
 
-Reported by a user. One fault found and fixed, a second found and NOT fixed.
+Reported by a user. Two faults, and the second one is a lesson about where to
+look.
 
-**Fixed:** py2Dmol's DOM is copied into `screen.html` from `index.html` with
+### Fault 1: the viewer was never revealed
+
+py2Dmol's DOM is copied into `screen.html` from `index.html` with
 `style="display: none"` on `#viewer-container`, because `index.html` reveals it
-when a fold lands - and this page never did. `drawScene` now reveals it before
-handing over the structure (py2Dmol fits its camera at ingest time, reading the
+when a fold lands - and this page never did. `drawScene` now reveals it BEFORE
+handing the structure over (py2Dmol fits its camera at ingest, reading the
 canvas size, and a canvas laid out inside `display: none` is 0x0), re-asserts
-after the loader settles, and pairs `_updateCanvasDimensions()` with
-`render()` the way the vendor's own ResizeObserver does. Measured: the container
-is now `display: flex` with the canvas at 705x705 and `clientWidth` 705 rather
-than 0.
+after the loader settles, and pairs `_updateCanvasDimensions()` with `render()`
+the way the vendor's own ResizeObserver does.
 
-**Still blank, and here is exactly how far it is localised.** py2Dmol accepts
-the file, resolves without rejecting, and registers NOTHING:
+### Fault 2: an unguarded `.checked` on a checkbox this page did not have
 
-| measurement | value |
-|---|---|
-| `py2dmolLoadFiles` return | `{objectsLoaded: 1, structureCount: 1, framesAdded: 0}` |
-| `renderer.coords` | `array(0)` |
-| `renderer.chains`, `plddts` | `array(0)` |
-| `renderer._framedObjects` | `[]` |
-| the structure picker's options | `[]` |
-| the scene PDB itself | 284 lines, well-formed `ATOM` records |
+`buildPendingObject` reads two sibling checkboxes and guards only one:
 
-So an object is created with **no frame**, and a structure with no frame has no
-coordinates to draw. Everything observable from outside - container visible,
-canvas sized, promise resolved, no error reported - is consistent with success,
-which is why this survived.
-
-🔴 **TWO THINGS TRIED AND REVERTED, because neither moved `framesAdded`**: a
-`<stem>_scores.json` beside the PDB (the only structural difference from
-`index.html`'s working call), and wrapping the scene in one `MODEL`/`ENDMDL`
-block (py2Dmol's parser delimits frames on `MODEL` records, and LocalFold's own
-PDBs arrive as a trajectory). Recorded so neither is tried a third time.
-
-### The confound is eliminated, and the object is never created
-
-`drawScene` now records every one of the PAGE's own loads
-(`globalThis.__sceneLoads`), so the first can be told from the repeats:
-
-```
-call 1, 279 atoms -> {objectsLoaded: 1, structureCount: 1, framesAdded: 0}
-call 2, 289 atoms -> {objectsLoaded: 1, structureCount: 1, framesAdded: 0}
+```js
+const p = document.getElementById("loadAsFramesCheckbox"),
+      m = document.getElementById("alignFramesCheckbox"),
+      g = !!m && m.checked;    // guarded
+const w = p.checked;           // NOT guarded  -> TypeError
 ```
 
-So `framesAdded: 0` is not a duplicate-object artefact: the FIRST load reports
-it too. And py2Dmol's own state, which it exposes as
-`window.buildViewerState()`, is empty:
+The copied subtree omitted `#loadAsFramesCheckbox`, so `p` was null and the
+throw landed in `processFiles`' PER-FILE `try/catch`:
 
 ```
-{ keys: [version, config, objects, current_object, viewer_state,
-         selections_by_object],
-  objects: 0, current_object: null }
+Error processing file screen.pdb:
+TypeError: Cannot read properties of null (reading 'checked')
+  at buildPendingObject -> processFiles
 ```
 
-🔴 **SO `objectsLoaded: 1` IS A COUNT OF FILES IT MEANT TO LOAD, NOT OBJECTS IT
-ADDED.** The object is never created, and the renderer holding
-`coords: array(0)` is the consequence rather than the fault.
+🔴 **AND EVERY OUTWARD SIGNAL SAID SUCCESS.** The promise resolved, no error
+reached the page, and the loader returned `objectsLoaded: 1` - which counts the
+files it MEANT to load, not the objects it added. The honest numbers were
+`framesAdded: 0`, `buildViewerState().objects: 0` and
+`renderer.coords: array(0)`.
 
-### What is ruled out, and where the fault must be
+| | before | after |
+|---|---|---|
+| `framesAdded` per hand-over | 0 | **1** |
+| `buildViewerState().objects` | 0 | **1** (`{name: 'screen', frames: 1}`) |
+| `renderer.coords` | 0 | **59** (33 cartoon CAs + 26 ligand atoms) |
+| console errors | 1, unread | **0** |
 
-- **The PDB is fine** - 279-284 well-formed `ATOM` records.
-- 🔴 **THE PARSER IS FINE, AND THE `MODEL` HYPOTHESIS WAS WRONG FOR A REASON
-  THAT COULD HAVE BEEN READ FIRST.** With no `MODEL` records the atoms
-  accumulate and the parser pushes one model at the end anyway:
-  `return n.length>0&&t.push(n), 0===t.length&&n.length>0&&t.push(n)`. A bare
-  `ATOM` file yields a frame, which is why wrapping the scene in
-  `MODEL`/`ENDMDL` changed nothing.
-- **The commit path is `handleIncrementalStateUpdate`**, which the registry
-  exposes per viewer and which does the `addObject`/`addFrame` work:
-  `for (const t of Object.keys(e)) p.objectsData[t] || (p.addObject(t), ...)`
-  then `p.addFrame(e, t)` and `p.render("handleIncrementalStateUpdate")`.
-- **The dispatch is keyed by viewer id**: the bundle resolves its target as
-  `py2dmol_viewers[window.viewerConfig.viewer_id]`, and
-  `o = t || i.viewer_id || e?.id || null` with `i = window.viewerConfig || {}`.
-  Neither page sets `window.viewerConfig` itself - the bundle writes it - and on
-  this page the registry key is `standalone-viewer-1`.
+The element is added **unchecked** where `index.html` has it checked, which is a
+different question answered differently: that page loads a sampler TRAJECTORY
+and wants each file to become a frame of one object, while this page hands over
+the whole scene on every redraw - frames would accumulate one per ligand and
+the viewer would sit on the first.
 
-**So the fault is between the parse and `handleIncrementalStateUpdate`:** either
-`processFiles` builds its frames map and dispatches to a viewer id that does not
-match this page's, or it declines to build the object for a reason it does not
-report. The next step is to read `processFiles` from the structure branch to its
-`Se(...)`/`handleIncrementalStateUpdate` call and see which viewer id it passes
-and what it requires - NOT to try another input shape. Two input-shape guesses
-(a `_scores.json`, a `MODEL` block) have already been tried and reverted.
+### 🔴 THE ANSWER WAS ALREADY WRITTEN DOWN IN THIS TREE
 
-**A second route, if that reading is slow:** `handleIncrementalStateUpdate` is
-callable directly off the registry, so the page could build the frames map and
-commit the object itself, bypassing `processFiles` entirely. That is more code
-to own but it is a path whose contract is visible in the bundle.
+`index.html` carries a comment about this exact element, measured there by
+deleting it: *"`processFiles` ... reads `p.checked` with NO guard ... the fold
+still computes and the status line still reads Done in 1.2 s ... and the
+structure never arrives ... A right answer nobody can see."* Several runs went
+into reverse-engineering a minified bundle while the sibling page said it
+plainly. Two input-shape guesses were spent on the way and both were refuted by
+reading rather than by running: a `_scores.json` beside the PDB, and wrapping
+the scene in `MODEL`/`ENDMDL` - the parser pushes a model at the end regardless
+(`return n.length>0&&t.push(n), 0===t.length&&n.length>0&&t.push(n)`).
 
-**And the gate that should have caught it now exists.**
-`tools/screen-in-page.py` asserts the computed style, the canvas's drawing
-buffer, and `renderer.coords.length > 0`. What it asserted before was the scene
-NOTE's text, which the page writes from its own bookkeeping whether or not one
-atom reached the viewer - so a blank box reported "3 of 3 ligands superposed
-onto run #1". `test/py2dmol-scaffold.test.js` already said this probe was "the
-authority on what is required... asserts at RUNTIME that the scene drew"; it
-did not.
+### What now holds it closed
+
+`tools/screen-in-page.py` asserts, at runtime on the real page:
+
+- the console is **empty** - the fault was a CAUGHT exception, and the only
+  record of it was a console line nothing read;
+- **`framesAdded == 1`** on every hand-over - the number that actually moves,
+  against the one that merely looked right;
+- `buildViewerState().objects >= 1` and `renderer.coords.length > 0`;
+- `#viewer-container`'s computed display, and the canvas's drawing buffer.
+
+What it asserted before was the scene NOTE's text, which the page writes from
+its own bookkeeping whether or not an atom reached the viewer - so a blank box
+reported "3 of 3 ligands superposed onto run #1".

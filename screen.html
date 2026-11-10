@@ -81,6 +81,33 @@ only the page is new.
     <div id="queue"></div>
   </div>
 
+  <!--
+    🔴 `#loadAsFramesCheckbox` IS WHY THIS PAGE'S SCENE WAS BLANK, AND
+    index.html's OWN COMMENT ALREADY SAID SO. `buildPendingObject` reads
+    `p.checked` on it with NO guard, where it guards its neighbour
+    (`g = !!m && m.checked` for `#alignFramesCheckbox`), so a document without
+    it throws INSIDE `processFiles`' per-file try: "Error processing file
+    screen.pdb: Cannot read properties of null (reading 'checked')". The promise
+    still resolves, the return still says `objectsLoaded: 1` - which counts
+    files it MEANT to load - and py2Dmol's state holds `objects: 0`.
+    index.html calls that "a right answer nobody can see", measured there by
+    deleting this very element; the subtree copied here left it out.
+
+    🔴 IT IS UNCHECKED WHERE index.html HAS IT CHECKED, which is a different
+    question answered differently: that page loads a sampler TRAJECTORY and
+    wants each file to become a frame of one object. This page hands the WHOLE
+    scene over on every redraw, so frames would accumulate one per ligand
+    scored and the viewer would sit on the first of them.
+
+    🔴 AND IT SITS OUTSIDE `#viewer-container`, as index.html's does in its own
+    hidden `.fetch-panel` - test/py2dmol-scaffold.test.js holds the two pages'
+    viewer SUBTREES to the same id set, and py2Dmol finds this by
+    `getElementById` from the document rather than within the viewer.
+  -->
+  <div class="py2dmol-hidden-inputs" style="display: none;" aria-hidden="true">
+    <input type="checkbox" id="loadAsFramesCheckbox">
+  </div>
+
   <div class="split">
     <div class="card">
       <div class="row">
@@ -98,6 +125,8 @@ only the page is new.
         index.html's, so the two cannot drift in silence.
       -->
         <div id="viewer-container" class="py2dmol-viewer-instance" style="display: none;">
+
+
 
             <div id="mainContainer">
 

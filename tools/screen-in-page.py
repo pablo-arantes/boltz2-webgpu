@@ -93,6 +93,35 @@ def main():
     try:
         ws.call("Runtime.enable")
         ws.call("Page.enable")
+        # 🔴 CAPTURE THE CONSOLE BEFORE ANY PAGE SCRIPT RUNS. py2Dmol's
+        # `initializeApp` wraps `initializePy2DmolViewer` in a try that, on a
+        # throw, does `console.error("Failed to initialize viewer:", e)` and
+        # RETURNS - before assigning the module-level `viewerApi` that every
+        # commit path in `processFiles` is optional-chained through. So a blank
+        # scene with a registered viewer is exactly what that early return
+        # looks like, and the only record of it is a console line. It also
+        # calls `setStatus`, which writes to `#status` - an element this page
+        # deliberately does not have, so the message has nowhere to go on
+        # screen either.
+        ws.call("Page.addScriptToEvaluateOnNewDocument", source="""
+          (() => {
+            globalThis.__consoleErrors = [];
+            for (const level of ['error', 'warn']) {
+              const original = console[level].bind(console);
+              console[level] = (...args) => {
+                try {
+                  globalThis.__consoleErrors.push(level + ': ' + args.map((a) =>
+                    (a && a.stack) ? String(a.stack).split('\\n').slice(0, 3).join(' | ')
+                                   : String(a)).join(' '));
+                } catch {}
+                original(...args);
+              };
+            }
+            addEventListener('error', (e) => {
+              globalThis.__consoleErrors.push('uncaught: ' + (e?.message ?? e));
+            });
+          })();
+        """)
         target = args.url or ("http://127.0.0.1:%d/screen.html" % PORT)
         print("driving:", target)
         started = time.time()
@@ -244,6 +273,8 @@ def main():
         # container is visible and sized, the promise resolves, no error is
         # reported, and the structure picker is empty. Walk the registry rather
         # than guess which field holds the structures.
+        print("console:", cdp.evaluate(ws,
+              "(globalThis.__consoleErrors ?? []).slice(0, 8)"))
         print("page loads:", cdp.evaluate(ws, "globalThis.__sceneLoads ?? 'none'"))
         # 🔴 py2Dmol'S OWN STATE, which it exposes as `window.buildViewerState`.
         # The parser is sound - with no MODEL records it still pushes one model
@@ -267,17 +298,6 @@ def main():
               "(globalThis.__scenePdb ?? '(none)').split('\\n').slice(0,3)"))
         print("pdb lines:", cdp.evaluate(ws,
               "(globalThis.__scenePdb ?? '').split('\\n').length"))
-        # 🔴 THE LOADER'S OWN RETURN VALUE. processFiles reports
-        # {objectsLoaded, framesAdded, structureCount}; the renderer holds
-        # coords: array(0), so it registered nothing from a file it accepted
-        # without error, and only these counts say at which step it gave up.
-        print("loader says:", cdp.evaluate(ws, """(async () => {
-          const text = globalThis.__scenePdb;
-          if (!text) return 'no scene pdb';
-          const f = { name: 'probe.pdb', readAsync: () => Promise.resolve(text) };
-          try { return await globalThis.py2dmolLoadFiles([f]); }
-          catch (e) { return 'threw: ' + (e?.message ?? e); }
-        })()"""))
         print("registry:", cdp.evaluate(ws, """(() => {
           const reg = globalThis.py2dmol_viewers ?? {};
           const keys = Object.keys(reg);
@@ -330,6 +350,29 @@ def main():
         if atoms["coords"] < 1:
             failures.append("the viewer holds no coordinates - the scene is"
                             f" blank ({atoms})")
+
+        # 🔴 EVERY HAND-OVER MUST ADD A FRAME. `processFiles` reports
+        # `objectsLoaded` as the number of files it MEANT to load, so it said 1
+        # while py2Dmol held nothing; `framesAdded` is the number that actually
+        # moved. A scene that loads 0 frames is the blank view this page shipped
+        # with.
+        loads = cdp.evaluate(ws, "globalThis.__sceneLoads ?? []")
+        for record in loads:
+            added = (record.get("settled") or {}).get("framesAdded")
+            if added != 1:
+                failures.append(f"scene load {record.get('call')} added"
+                                f" {added} frames, not 1 ({record})")
+
+        # 🔴 AND AN EMPTY CONSOLE, because the fault that produced the blank
+        # scene was a CAUGHT exception: `buildPendingObject` reads
+        # `#loadAsFramesCheckbox`'s `.checked` with no guard, the subtree here
+        # omitted the element, and `processFiles`' per-file try swallowed the
+        # TypeError. The promise resolved, the counts looked right, and the only
+        # record of it was a console line nothing was reading.
+        errors = cdp.evaluate(ws, "(globalThis.__consoleErrors ?? [])")
+        if errors:
+            failures.append(f"the page logged {len(errors)} console error(s):"
+                            f" {errors[:3]}")
 
         if args.screenshot:
             shot = ws.call("Page.captureScreenshot",

@@ -6,6 +6,8 @@ WebGPU.
 
 **Live: https://pablo-arantes.github.io/boltz2-webgpu/screen.html**
 
+![One target and three ligands: the ranked table, the two-score scatter, and every pose superposed in one scene](docs/assets/screening.png)
+
 ## What it does
 
 Paste a target sequence, give it a list of SMILES, and press Screen. For each
