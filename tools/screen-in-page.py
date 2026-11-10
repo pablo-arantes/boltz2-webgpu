@@ -278,11 +278,31 @@ def main():
             display: box === null ? 'missing' : getComputedStyle(box).display,
             width: canvas?.width ?? 0, height: canvas?.height ?? 0,
             clientWidth: canvas?.clientWidth ?? 0,
+            // 🔴 THE CONTAINER TOO. The canvas is sized from this box's rect at
+            // init, so "the canvas is 600" and "the box is 600" point at
+            // different faults with different fixes.
+            boxWidth: document.getElementById('canvasContainer')?.clientWidth ?? 0,
           };
         })()""")
-        print("viewport:", cdp.evaluate(ws,
-              "({ inner: innerWidth, column: document.body.clientWidth })"))
+        metrics = cdp.evaluate(ws,
+                                "({ inner: innerWidth,"
+                                " column: document.body.clientWidth })")
+        print("viewport:", metrics)
+        body_width = metrics["column"]
         print("viewer:", viewer)
+        print("chain:", cdp.evaluate(ws, """(() => {
+          const out = [];
+          let el = document.getElementById('canvasContainer');
+          while (el && el.tagName !== 'HTML') {
+            const cs = getComputedStyle(el);
+            out.push((el.id || '.' + String(el.className).split(' ')[0])
+              + ' client=' + el.clientWidth + ' css=' + cs.width
+              + ' inline=' + (el.style.width || '-') + ' ' + cs.display
+              + '/' + cs.flexDirection);
+            el = el.parentElement;
+          }
+          return out;
+        })()"""))
         # 🔴 py2Dmol'S OWN STATE, because every outside symptom is consistent
         # with "the loader accepted the file and registered nothing": the
         # container is visible and sized, the promise resolves, no error is
@@ -362,6 +382,17 @@ def main():
         print("renderer holds:", atoms)
         if atoms["viewers"] < 1:
             failures.append("no py2Dmol viewer was built")
+        # 🔴 AND THE CANVAS FILLS THE COLUMN. py2Dmol wraps the canvas box in
+        # `.py2dmol-slot-body` once a structure loads and its stylesheet pins
+        # that wrapper to 600, so the viewer silently reverts to 600 of a 948
+        # page - which is what it did for four attempts while every box this
+        # probe measured looked right. The chain is printed above for the same
+        # reason; this makes it fail rather than merely print.
+        if viewer["boxWidth"] < 0.8 * body_width:
+            failures.append(f"the canvas is {viewer['boxWidth']}px in a"
+                            f" {body_width}px column - the slot wrapper is"
+                            " pinning it again (see the chain above)")
+
         if atoms["coords"] < 1:
             failures.append("the viewer holds no coordinates - the scene is"
                             f" blank ({atoms})")

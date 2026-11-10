@@ -96,3 +96,60 @@ tr.skipped td { color: var(--muted); }
 #queue span.done { background: #f0fdf4; border-color: #bbf7d0; }
 #queue span.failed, #queue span.refused { background: #fef2f2; border-color: #fecaca;
   color: var(--bad); }
+
+
+/* 🔴 THE CANVAS FILLS THE COLUMN, AND THE CONTROLS GO UNDER IT. py2Dmol lays
+   `#mainContainer` out as a flex ROW and pins the canvas to 600, which is
+   right for index.html: 600 of canvas beside a 340 panel carrying the PAE map,
+   the confidence card and the heatmap tabs - the 948 column exactly. This page
+   has none of those panels, so that row left ~330px holding six buttons and a
+   picker, with ~450px of white under them.
+
+   🔴 THE BOX THAT WAS ACTUALLY 600 IS `.py2dmol-slot-body`, AND IT DOES NOT
+   EXIST UNTIL THE FIRST STRUCTURE LOADS. py2Dmol then WRAPS the canvas box in
+   `.py2dmol-slot > .py2dmol-slot-body` - its fullscreen machinery looks for
+   `.py2dmol-slot--1 > .py2dmol-slot-body` - and its stylesheet pins slot 1's
+   body to 600x600. So `width: 100%` on `#canvasContainer` applied the whole
+   time and resolved to 100% OF 600.
+
+   That cost four wrong attempts, all aimed at boxes that were already correct:
+   specificity (mine wins, two ids against an id and a class), flex alignment,
+   and stating the ancestors' widths. What settled it was printing every
+   ancestor's width in the BROKEN state:
+
+     canvasContainer     client=598  css=600px
+     .py2dmol-slot-body  client=600  css=600px   <- here
+     .py2dmol-slot       client=890  css=890px
+     viewerColumn        client=890  css=890px
+
+   🔴 AND A CHECK ON A FRESHLY LOADED PAGE CANNOT SEE IT, because the wrapper is
+   absent until something is loaded: the same chain measures 890 throughout
+   before the first scene. The vendor ships `width: 100%` for the slot and its
+   body in its own narrow-screen query, so this is its supported wide geometry
+   rather than a new one.
+
+   🔴 AND IT TAKES **BOTH** OF THE RULES BELOW - the stated widths AND the slot
+   body - which was established by deleting the first pair as "dead" and
+   measuring 604 instead of 894. `revealViewer` sets `display: flex` on
+   `#viewer-container`, so `#mainContainer` becomes a flex ITEM that sizes to
+   its content while its content sizes from it; the vendor's own stylesheet
+   warns about exactly this a few lines past its 948 rule - "Stating the width
+   breaks that circularity." Overriding the slot body alone leaves that
+   circularity in place, and stating the widths alone leaves the slot body
+   pinned at 600. Neither rule is redundant; do not tidy either away without
+   re-measuring the chain AFTER a scene has loaded.
+
+   🔴 THE HEIGHT IS FIXED RATHER THAN SQUARE. The vendor's narrow-screen rule
+   pairs `width: 100%` with `aspect-ratio: 1 / 1`, which at ~900 wide is a
+   ~900-tall viewport - taller than most screens, pushing the ranked table off
+   the fold. A protein with its ligands reads better landscape, and the resize
+   handle still works for anyone who disagrees. */
+#viewer-container { width: 100%; }
+#viewer-container #mainContainer {
+  flex-direction: column; align-items: stretch; width: 100%;
+}
+#viewer-container #viewerColumn,
+#viewer-container #rightPanelsContainer { width: 100%; }
+#viewer-container .py2dmol-slot,
+#viewer-container .py2dmol-slot > .py2dmol-slot-body { width: 100%; }
+#viewer-container #canvasContainer { width: 100%; height: 600px; }
