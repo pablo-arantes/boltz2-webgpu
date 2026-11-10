@@ -28,6 +28,8 @@ refs/        NOT COMMITTED and not part of the deliverable: upstream clones,
              `tools/fetch_boltz_cache.sh`
 ```
 
+**Live: https://pablo-arantes.github.io/boltz2-webgpu/screen.html**
+
 ![The screening page: one target, many ligands, ranked by predicted affinity](docs/assets/screening.jpg)
 
 ## Run it
@@ -439,7 +441,45 @@ The site builds and deploys from `main` through
   there, so it costs a visitor nothing.
 
 - 🔴 **NOTHING NEEDS COOP/COEP.** No `SharedArrayBuffer` and no threaded WASM,
-  so the headers GitHub Pages cannot set are not required.
+  so the headers GitHub Pages cannot set are not required. Checked with a
+  pattern over the tree and over `dist/`, not assumed.
+
+### The live site, driven rather than eyeballed
+
+`tools/screen-in-page.py --url=<the published page>` wipes the Chrome profile
+and drives the deployed site through CDP - no HTTP cache, no CacheStorage, no
+compiled shaders - so what it measures is a first visit. One target (33
+residues) and three ligands, at 1 recycle / 20 steps / 1 sample:
+
+| | single sequence | with the MMseqs2 search |
+|---|---|---|
+| cold start to a runnable page | **79.2 s / 103.6 s** (two runs) | **50.2 s** |
+| three ligands scored | 12 s / 6 s | 7 s |
+| `api.colabfold.com` requests | **0** | **2, for 3 ligands** |
+| ZIP | README.txt, affinity.csv, 3 PDBs | same, 19,171 B |
+| CSV | 5 lines | 5 lines |
+| ligands superposed onto run #1 | 3 of 3 | 3 of 3 |
+
+🔴 **COLD START IS ALMOST ENTIRELY THE STRUCTURE BUNDLE** - 365 MiB of it
+against the affinity bundle's 6.51 - and it varies with the connection more
+than with anything this code does, which is why three numbers are given rather
+than one.
+
+🔴 **AND THE SINGLE-SEQUENCE OPT-OUT IS A MEASURED ZERO, NOT A PROMISE.**
+Resource timing records every request the page made; in that mode the count
+aimed at api.colabfold.com is exactly 0. With the search on it is 2 for THREE
+ligands rather than six, which is the page's "searched once per target and
+cached by sequence hash" as a count. The alignment demonstrably reached the
+model: the same three ligands come back with different ipTM (0.63/0.58/0.43
+against 0.38/0.58/0.28), which only an alignment would do.
+
+🔴 **ONE THING WORKED LOCALLY AND NOT ON PAGES, AND IT WAS THE PROBE.**
+`import('/web/screen-export.js')` resolves at `/` under a local server and
+fetches `<host>/web/screen-export.js` - base dropped - under a project page.
+The page's own imports are all relative; the harness's was not. Fixing it also
+exposed that the workflow's root-absolute guard matched only DOUBLE quotes, so
+a single-quoted `import('/...')` would have passed the check written to stop
+exactly that. Both fixed, and `dist/` is clean under the wider pattern.
 
 ## Licences
 
