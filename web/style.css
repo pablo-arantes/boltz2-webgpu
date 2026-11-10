@@ -1,0 +1,181 @@
+@import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap");
+
+:root {
+  color-scheme: dark;
+  font-family: Manrope, ui-sans-serif, system-ui, sans-serif;
+  --ink: #edf6f1; --muted: #94aaa1; --line: #24413a; --accent: #6ee7b7; --danger: #ff8e83;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; min-height: 100vh; background: #07110f; color: var(--ink); }
+button, input, select, textarea { font: inherit; }
+a { color: var(--accent); }
+
+main { width: min(760px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 56px; }
+
+/* Title left, the one action right, nothing between them. */
+header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .7rem; }
+header h1 { margin: 0; font-size: 1.4rem; font-weight: 700; letter-spacing: -.03em; }
+header h1 em { color: var(--accent); font-style: normal; font-weight: 500; }
+
+/* --- input --- */
+label { display: block; margin-bottom: .5rem; font-size: .8rem; color: var(--muted); }
+textarea, input, select {
+  width: 100%; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: 6px;
+  background: #0a1714; color: var(--ink); font-family: "DM Mono", ui-monospace, monospace;
+  font-size: .86rem; line-height: 1.5; resize: vertical;
+}
+textarea:focus, input:focus, select:focus { outline: none; border-color: var(--accent); }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: .8rem; }
+.count { color: var(--muted); font-family: "DM Mono", ui-monospace, monospace; font-size: .78rem; }
+
+.primary {
+  padding: .6rem 1.6rem; border: 0; border-radius: 6px; background: var(--accent); color: #04120c;
+  font-weight: 700; cursor: pointer; min-width: 5.5rem; text-align: center;
+}
+.primary:hover:not(:disabled) { filter: brightness(1.08); }
+.primary:disabled { opacity: .5; cursor: progress; }
+.primary.stop { background: #dc2626; color: #fff; }
+.primary.stop:disabled { opacity: 1; }
+.quiet {
+  padding: .45rem .9rem; border: 1px solid var(--line); border-radius: 6px;
+  background: transparent; color: var(--muted); font-size: .78rem; cursor: pointer;
+}
+.quiet:hover { color: var(--accent); border-color: var(--accent); }
+
+/* --- status --- */
+.status { margin: 1.4rem 0 0; font-family: "DM Mono", ui-monospace, monospace; font-size: .8rem; color: var(--muted); }
+.status[data-state="running"] { color: var(--accent); }
+.status[data-state="done"] { color: var(--accent); }
+.status[data-state="failed"] { color: var(--danger); }
+progress { width: 100%; height: 3px; margin-top: .6rem; border: 0; background: #0a1714; }
+progress::-webkit-progress-bar { background: #0a1714; }
+progress::-webkit-progress-value { background: var(--accent); }
+
+/* --- results --- */
+#results { margin-top: 2rem; }
+.scores { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.scores div { padding: .9rem 1rem; background: #0a1714; }
+.scores span { display: block; font-size: .72rem; color: var(--muted); }
+.scores strong { font-family: "DM Mono", ui-monospace, monospace; font-size: 1.35rem; font-weight: 500; }
+
+/* NO overflow:hidden AND NO FIXED HEIGHT. py2Dmol's shell is the canvas PLUS
+   the play bar beneath it, so a clipped 460px box cut the bar off entirely -
+   the strip was built, was visible by its own reckoning, and sat 5px below the
+   clip edge. min-height keeps the empty box looking deliberate; the shell sets
+   the real height once it is in. */
+#viewer {
+  position: relative; display: block; width: 100%; min-height: 460px; margin-top: 1rem;
+  border: 1px solid var(--line); border-radius: 6px; background: #0a1714;
+}
+.caption { flex: 1; margin: .7rem 0 0; color: var(--muted); font-size: .78rem; line-height: 1.5; }
+.caption strong { color: var(--accent); font-weight: 500; }
+#plddt-plot { display: block; width: 100%; height: auto; margin-top: 1.4rem; border: 1px solid var(--line); border-radius: 6px; }
+
+footer {
+  display: grid; gap: .5rem; margin-top: 3.5rem; padding-top: 1.4rem;
+  border-top: 1px solid var(--line); color: var(--muted); font-size: .74rem; line-height: 1.6;
+}
+#gpu-summary { font-family: "DM Mono", ui-monospace, monospace; }
+#gpu-summary[data-state="ready"] { color: var(--accent); }
+#gpu-summary[data-state="missing"] { color: var(--danger); }
+
+/* --- dev.html only --- */
+.grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: .8rem; margin-bottom: 1rem; }
+.grid label { margin: 0; }
+#result {
+  margin-top: 1rem; padding: 1rem; border: 1px solid var(--line); border-radius: 6px;
+  background: #0a1714; font-family: "DM Mono", ui-monospace, monospace; font-size: .76rem;
+  white-space: pre-wrap; overflow-x: auto;
+}
+.status[data-state="passed"] { color: var(--accent); }
+
+@media (max-width: 560px) {
+  .scores { grid-template-columns: 1fr; }
+  .grid { grid-template-columns: 1fr 1fr; }
+  #viewer { min-height: 380px; }
+}
+
+/* --- mutate menu ---
+   Absolutely placed inside #viewer, which is position:relative. It sits over
+   the canvas, so it needs a ground of its own - the canvas is opaque and a
+
+/* --- colour legend --- */
+.inline { display: flex; align-items: center; gap: .5rem; margin: 0; white-space: nowrap; }
+.inline select { width: auto; padding: .35rem .5rem; font-size: .78rem; }
+.legend { display: flex; flex-wrap: wrap; gap: .3rem 1rem; margin: .7rem 0 0; font-size: .72rem; color: var(--muted); }
+.swatch { display: inline-flex; align-items: center; gap: .35rem; }
+.swatch::before { content: ""; width: 10px; height: 10px; border-radius: 2px; background: var(--swatch); }
+
+.legend-title { margin: 1rem 0 .35rem; font-size: .72rem; color: var(--muted); letter-spacing: .02em; }
+
+/* --- mutation panel: docked under the viewer, lining its bottom edge --- */
+#mutate-panel {
+  /* -1px so its top border sits ON the viewer's bottom border and the two read
+     as one box rather than two stacked ones. */
+  margin-top: -1px; padding: .5rem .6rem; border: 1px solid var(--line);
+  border-radius: 0 0 6px 6px; background: #0c1a16;
+}
+.mutate-bar { display: flex; align-items: center; gap: .6rem; margin-bottom: .45rem; }
+.mutate-title { margin: 0; font-family: "DM Mono", ui-monospace, monospace; font-size: .78rem; color: var(--ink); }
+.mutate-hint { flex: 1; margin: 0; font-size: .7rem; color: var(--muted); }
+.mutate-grid { display: flex; flex-wrap: wrap; gap: 3px; }
+.mutate-cell {
+  flex: 1 1 26px; min-width: 26px; height: 26px; padding: 0;
+  border: 1px solid transparent; border-radius: 4px; background: var(--cell);
+  color: #07110f; font-family: "DM Mono", ui-monospace, monospace;
+  font-size: .76rem; font-weight: 500; cursor: pointer;
+}
+.mutate-cell:hover { border-color: var(--ink); }
+/* THE RESIDUE IT ALREADY IS. An outline in the accent colour was lost against
+   twenty saturated cells - it read as a slightly different edge rather than as
+   "this one". A dark ring with a light halo outside it reads on every band in
+   the ramp, orange through blue, because it does not rely on hue at all. */
+.mutate-cell.is-current {
+  border-color: #07110f;
+  box-shadow: 0 0 0 2px #07110f, 0 0 0 4px var(--ink);
+  font-weight: 700;
+}
+.mutate-close {
+  width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px;
+  background: transparent; color: var(--muted); font-size: 1rem; line-height: 1; cursor: pointer;
+}
+.mutate-close:hover { color: var(--ink); background: #16302a; }
+
+/* The empty viewer before a first fold: the box keeps the page's shape rather
+   than having everything jump down when a structure arrives. */
+.viewer-empty { display: grid; place-items: center; height: 100%; margin: 0; color: var(--muted); font-size: .8rem; }
+
+.options { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: .9rem; }
+
+/* --- the sequence, sitting directly on the viewer --- */
+#prediction-form { position: relative; margin: 0; }
+#prediction-form textarea {
+  display: block; border-radius: 6px 6px 0 0; border-bottom-color: transparent; resize: vertical;
+}
+/* ...the count floats in the corner of the box rather than taking a row */
+#prediction-form .count { position: absolute; right: .6rem; bottom: .45rem; pointer-events: none; }
+/* ...and the viewer joins straight on, one border between them */
+#viewer { margin-top: -1px; border-radius: 0 0 6px 6px; }
+
+/* --- the orient button, floating over the viewer's top-right corner --- */
+.viewer-wrap { position: relative; }
+.overlay-button {
+  position: absolute; top: 8px; right: 8px; z-index: 5;
+  padding: .3rem .7rem; border: 1px solid var(--line); border-radius: 5px;
+  background: #0c1a16cc; color: var(--muted); font-size: .7rem; cursor: pointer;
+  backdrop-filter: blur(2px);
+}
+.overlay-button:hover { color: var(--accent); border-color: var(--accent); }
+
+/* WAITING, WITH NOTHING TO COUNT. A <progress> with no `value` is indeterminate,
+   and Chrome animates it - but only until a page styles ::-webkit-progress-value,
+   which we do, and then it renders as an empty track. An empty bar during the
+   longest part of a fold reads worse than a stuck one, so the motion is ours. */
+progress:not([value]) {
+  background: linear-gradient(90deg, #0a1714 0%, #0a1714 35%, var(--accent) 50%, #0a1714 65%, #0a1714 100%);
+  background-size: 250% 100%;
+  animation: localfold-sweep 1.2s linear infinite;
+}
+progress:not([value])::-webkit-progress-bar { background: transparent; }
+@keyframes localfold-sweep { from { background-position: 125% 0; } to { background-position: -125% 0; } }

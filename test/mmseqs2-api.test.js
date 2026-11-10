@@ -1,0 +1,638 @@
+import { describe, expect, it, vi } from "./harness.js";
+import {
+  AlignmentServerError,
+  expandSearchedChains,
+  extractMmseqs2A3m, generateMmseqs2ComplexMsa, generateMmseqs2Msa,
+  generateMmseqs2PairedMsa, mergeSearchedChains, planSearchReuse, readTarFiles,
+  searchCacheEntry,
+} from "../shared/input/mmseqs2-api.js";
+import { foldsAsSingleSequence, parseA3m } from "../shared/input/a3m.js";
+import { AF3_FAMILIES, FOLDING_FAMILIES, MODEL_BUNDLES, SINGLE_SEQUENCE_FAMILIES, graphFamily }
+  from "../shared/bundles/manifests/index.js";
+import { mergeChainA3ms, mergeRowAlignedChainA3ms, mergeUnpairedChainA3ms }
+  from "../shared/input/chains.js";
+
+function tar(files) {
+  const chunks= [];
+  for (const [name, value] of Object.entries(files)) {
+    const header = new Uint8Array(512); const encodedName = new TextEncoder().encode(name);
+    header.set(encodedName, 0);
+    header.set(new TextEncoder().encode(value.length.toString(8).padStart(11, "0") + "\0"), 124);
+    header[156] = 48;
+    const data = new TextEncoder().encode(value); const padded = new Uint8Array(Math.ceil(data.length / 512) * 512); padded.set(data);
+    chunks.push(header, padded);
+  }
+  chunks.push(new Uint8Array(1024));
+  const output = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
+  let offset = 0; for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.length; }
+  return output;
+}
+
+const resultTar = tar({
+  "uniref.a3m": ">101\nACDE\n>hit1\nAC-E\n\0",
+  "bfd.mgnify30.metaeuk30.smag30.a3m": ">101\nACDE\n>env1\nAcCDE\n\0",
+});
+
+describe("MMseqs2 API", () => {
+  it("reads files and combines the ColabFold UniRef and environmental A3Ms", () => {
+    expect([...readTarFiles(resultTar).keys()]).toEqual(["uniref.a3m", "bfd.mgnify30.metaeuk30.smag30.a3m"]);
+    expect(extractMmseqs2A3m(resultTar)).toBe(">101\nACDE\n>hit1\nAC-E\n>101\nACDE\n>env1\nAcCDE\n");
+  });
+
+  it("submits, polls, downloads, and validates a generated MSA", async () => {
+    const requests= [];
+    const responses = [
+      new Response(JSON.stringify({ status: "PENDING", id: "ticket-1" })),
+      new Response(JSON.stringify({ status: "RUNNING" })),
+      new Response(JSON.stringify({ status: "COMPLETE" })),
+      new Response(new Uint8Array([1, 2, 3])),
+    ];
+    const fetchImplementation = vi.fn(async (input, init) => {
+      requests.push({ url: String(input), ...(init === undefined ? {} : { init }) });
+      return responses.shift() ;
+    });
+    const phases= [];
+    const result = await generateMmseqs2Msa("ACDE", {
+      fetchImplementation, wait: async () => {}, decompress: async () => resultTar,
+      onProgress: (progress) => phases.push(progress.phase),
+    });
+    expect(result.ticket).toBe("ticket-1"); expect(result.depth).toBe(4);
+    expect(requests.map((entry) => entry.url)).toEqual([
+      "https://api.colabfold.com/ticket/msa", "https://api.colabfold.com/ticket/ticket-1",
+      "https://api.colabfold.com/ticket/ticket-1", "https://api.colabfold.com/result/download/ticket-1",
+    ]);
+    expect(String(requests[0] .init?.body)).toContain("mode=env");
+    expect(phases).toEqual(["submitting", "queued", "running", "downloading", "complete"]);
+  });
+
+  it("pairs both copies when asked", async() => {
+    const responses = [
+      new Response(JSON.stringify({ status: "COMPLETE", id: "ticket-homo" })),
+      new Response(new Uint8Array([1, 2, 3])),
+    ];
+    const fetchImplementation = vi.fn(async() => responses.shift());
+    const result = await generateMmseqs2ComplexMsa(["ACDE", "ACDE"], {
+      fetchImplementation, wait: async() => {}, decompress: async() => resultTar,
+      model: "multimer",
+    });
+    expect(fetchImplementation.mock.calls.length).toBe(2);
+    expect(result.tickets).toEqual(["ticket-homo"]);
+    const parsed = parseA3m(result.a3m);
+    expect(parsed.query).toBe("ACDEACDE");
+    // ...one row carrying the homolog in BOTH copies, not two gap-padded rows.
+    // Same protein twice means row s is one organism, so the pairing is exact.
+    expect(parsed.sequences).toContain("AC-EAC-E");
+    expect(parsed.sequences.includes("AC-E----")).toBe(false);
+    expect(parsed.sequences.includes("----AC-E")).toBe(false);
+  });
+
+  it("gives each model the merge that model wants", async() => {
+    // 🔴 THE MAPPING IS PINNED, NOT THE CONTENT. All three merges return a
+    // valid A3M of the right width whose first row is the query, so handing a
+    // model the wrong one produces a fold rather than an error - which is how a
+    // homodimer came to be folded against a doubled alignment. Comparing the
+    // result against the merge functions themselves catches a swapped mapping
+    // even on an input where two of them happen to agree, which a homodimer is.
+    const run = async(model) => {
+      const responses = [
+        new Response(JSON.stringify({ status: "COMPLETE", id: "ticket-homo" })),
+        new Response(new Uint8Array([1, 2, 3])),
+      ];
+      return generateMmseqs2ComplexMsa(["ACDE", "ACDE"], {
+        fetchImplementation: async() => responses.shift(),
+        wait: async() => {}, decompress: async() => resultTar, model,
+      });
+    };
+    for (const [model, merge] of [
+      ["monomer", mergeUnpairedChainA3ms],
+      ["multimer", mergeChainA3ms],
+      ["af3", mergeRowAlignedChainA3ms],
+    ]) {
+      const result = await run(model);
+      expect(result.a3m).toBe(merge(result.chainA3ms));
+    }
+  });
+
+  it("distinguishes the three merges on a heteromer, which is where they differ", () => {
+    // A homomer cannot tell multimer from AF3: with one entity, dense-within-
+    // entity and dense-throughout are the same thing. Two entities separate
+    // them, and separate both from the monomer's block-diagonal form.
+    const a = ">q\nACDE\n>h\nAC-E\n";
+    const b = ">q\nWYWY\n>k\nW-WY\n";
+    // The monomer gives every homolog a row to itself.
+    expect(parseA3m(mergeUnpairedChainA3ms([a, b])).sequences).toContain("AC-E----");
+    // Multimer block-diagonalises BETWEEN entities, so a heteromer looks the
+    // same - copies of ONE sequence are what it would have made dense.
+    expect(parseA3m(mergeChainA3ms([a, b])).sequences).toContain("AC-E----");
+    // AF3 is dense regardless of entity: one row carries both chains' hits.
+    const af3 = parseA3m(mergeRowAlignedChainA3ms([a, b])).sequences;
+    expect(af3).toContain("AC-EW-WY");
+    expect(af3.includes("AC-E----")).toBe(false);
+  });
+
+  it("pairs distinct sequences through ticket/pair, and stacks the blocks", async() => {
+    // 🔴 THE PAIRED ROWS MUST LINE UP ACROSS CHAINS AND SIT ON TOP. pair.a3m
+    // holds every query's alignment NUL-separated, row r of one being the same
+    // species as row r of another - so the merged result must carry one row
+    // with BOTH chains' paired hits, above the block-diagonal unpaired rows.
+    const pairTar = tar({
+      "pair.a3m": ">101\nACDE\n>hit_sp1\nAC-E\n\0>102\nWYWY\n>hit_sp1\nW-WY\n\0",
+    });
+    // Each chain's unpaired block holds its paired hit AGAIN - which is what a
+    // real search returns, both blocks coming from the same databases - and one
+    // hit found only unpaired. AlphaFold drops the first and keeps the second.
+    const chainTar = (query, hit, only) => tar({
+      "uniref.a3m": `>101\n${query}\n>u1\n${hit}\n`
+        + (only === undefined ? "" : `>u2\n${only}\n`) + "\0",
+      "bfd.mgnify30.metaeuk30.smag30.a3m": `>101\n${query}\n\0`,
+      // A one-chain job's template hit is query 101, whichever chain it is.
+      "pdb70.m8": `101\t${query === "ACDE" ? "1abc_A" : "2xyz_B"}\t0.9\t4\t0\t0\t1\t4\t1\t4\t1e-5\t50\n`,
+    });
+    const posted = [];
+    let downloads = 0;
+    const result = await generateMmseqs2ComplexMsa(["ACDE", "WYWY"], {
+      fetchImplementation: async(url, init) => {
+        const href = String(url);
+        if (init?.method === "POST") {
+          posted.push({ href, mode: new URLSearchParams(String(init.body)).get("mode") });
+          return new Response(JSON.stringify({ status: "COMPLETE", id: `t${posted.length}` }));
+        }
+        return new Response(new Uint8Array([1, 2, 3]));
+      },
+      wait: async() => {},
+      // The two chain searches come first, then the pair job.
+      decompress: async() => {
+        downloads += 1;
+        if (downloads === 1) return chainTar("ACDE", "AC-E", "ACD-");
+        if (downloads === 2) return chainTar("WYWY", "W-WY", "WY-Y");
+        return pairTar;
+      },
+      model: "multimer",
+    });
+
+    // One pair submission, with the pairing mode, alongside the two searches.
+    expect(posted.filter((p) => p.href.endsWith("ticket/pair")).length).toBe(1);
+    expect(posted.find((p) => p.href.endsWith("ticket/pair")).mode).toBe("pairgreedy");
+    expect(result.pairedDepth).toBe(2);
+    // 🔴 THE TEMPLATE HITS SURVIVE THE MERGE, BY CHAIN - they were dropped,
+    // and every complex's automatic template failed as "not a search".
+    expect(result.templateHits.get(0)[0].target).toBe("1abc_A");
+    expect(result.templateHits.get(1)[0].target).toBe("2xyz_B");
+
+    const rows = parseA3m(result.a3m).sequences;
+    expect(rows[0]).toBe("ACDEWYWY");
+    // The paired row carries both chains' hits at once...
+    expect(rows[1]).toBe("AC-EW-WY");
+    // ...and the unpaired rows follow it, block-diagonal between entities.
+    expect(rows).toContain("ACD-----");
+    expect(rows).toContain("----WY-Y");
+    // 🔴 AND THE ROWS THE PAIRED BLOCK ALREADY HAS ARE GONE FROM THE UNPAIRED
+    // ONE. AlphaFold deduplicates per chain before merging
+    // (msa_pairing.deduplicate_unpaired_sequences), and it is not tidiness: the
+    // blocks share one row budget, so a duplicate evicts a sequence that
+    // carried something. Both chains' unpaired blocks held their paired hit.
+    expect(rows.includes("AC-E----")).toBe(false);
+    expect(rows.includes("----W-WY")).toBe(false);
+    // The query appears once, not once per block.
+    expect(rows.filter((row) => row === "ACDEWYWY").length).toBe(1);
+    // AF3 gets them apart, because its profile is over the unpaired block only.
+    expect(parseA3m(result.blocks.paired).sequences).toContain("AC-EW-WY");
+    expect(parseA3m(result.blocks.unpaired).sequences.includes("AC-EW-WY")).toBe(false);
+    // 🔴 AND THE PROFILE'S BLOCK STILL HAS THE DEDUPLICATED ROWS. AF3 computes
+    // the profile at features.py:543 and deduplicates at :559, so the rows the
+    // dedup removes still counted towards it. Handing the model the shrunken
+    // block for both is a different feature, not a tidier one.
+    expect(parseA3m(result.blocks.unpairedProfile).sequences).toContain("AC-E----");
+    expect(parseA3m(result.blocks.unpairedProfile).sequences).toContain("----W-WY");
+  });
+
+  it("does not pair a homomer, where one search already speaks for every copy", async() => {
+    // AlphaFold decides this the same way: feature_processing sets
+    // pair_msa_sequences from `not _is_homomer_or_monomer`. A second search here
+    // would cost a round trip to learn nothing.
+    const posted = [];
+    const result = await generateMmseqs2ComplexMsa(["ACDE", "ACDE"], {
+      fetchImplementation: async(url, init) => {
+        if (init?.method === "POST") {
+          posted.push(String(url));
+          return new Response(JSON.stringify({ status: "COMPLETE", id: "t" }));
+        }
+        return new Response(new Uint8Array([1, 2, 3]));
+      },
+      wait: async() => {}, decompress: async() => resultTar, model: "multimer",
+    });
+    expect(posted.some((href) => href.endsWith("ticket/pair"))).toBe(false);
+    expect(result.blocks.paired).toBe(null);
+    expect(result.pairedDepth).toBe(0);
+  });
+
+  it("never pairs for the AF2 monomer, whatever the complex", async() => {
+    // The monomer has no chain input at all - the +200 offset stands in for one
+    // - so a row spanning two chains would claim their residues coevolved.
+    const posted = [];
+    // Each chain's unpaired block holds its paired hit AGAIN - which is what a
+    // real search returns, both blocks coming from the same databases - and one
+    // hit found only unpaired. AlphaFold drops the first and keeps the second.
+    const chainTar = (query, hit, only) => tar({
+      "uniref.a3m": `>101\n${query}\n>u1\n${hit}\n`
+        + (only === undefined ? "" : `>u2\n${only}\n`) + "\0",
+      "bfd.mgnify30.metaeuk30.smag30.a3m": `>101\n${query}\n\0`,
+    });
+    let downloads = 0;
+    const result = await generateMmseqs2ComplexMsa(["ACDE", "WYWY"], {
+      fetchImplementation: async(url, init) => {
+        if (init?.method === "POST") {
+          posted.push(String(url));
+          return new Response(JSON.stringify({ status: "COMPLETE", id: "t" }));
+        }
+        return new Response(new Uint8Array([1, 2, 3]));
+      },
+      wait: async() => {},
+      decompress: async() => (downloads++ === 0 ? chainTar("ACDE", "AC-E") : chainTar("WYWY", "W-WY")),
+      model: "monomer",
+    });
+    expect(posted.some((href) => href.endsWith("ticket/pair"))).toBe(false);
+    expect(result.blocks.paired).toBe(null);
+  });
+
+  it("refuses paired alignments whose depths disagree", async() => {
+    // Equal depth is what makes them paired: row r must exist in every entity
+    // for "row r is one species" to mean anything. A ragged set still merges
+    // into a valid alignment and would silently pair different organisms.
+    const ragged = tar({
+      "pair.a3m": ">101\nACDE\n>a\nAC-E\n>b\nA--E\n\0>102\nWYWY\n>a\nW-WY\n\0",
+    });
+    let message = "no error";
+    try {
+      await generateMmseqs2PairedMsa(["ACDE", "WYWY"], {
+        fetchImplementation: async(url, init) => (init?.method === "POST"
+          ? new Response(JSON.stringify({ status: "COMPLETE", id: "t" }))
+          : new Response(new Uint8Array([1, 2, 3]))),
+        wait: async() => {}, decompress: async() => ragged,
+      });
+    } catch (error) { message = error.message; }
+    expect(message).toContain("aligned row counts");
+  });
+
+  it("refuses a model it has no merge for", async() => {
+    let message = "no error";
+    try {
+      const responses = [
+        new Response(JSON.stringify({ status: "COMPLETE", id: "t" })),
+        new Response(new Uint8Array([1, 2, 3])),
+      ];
+      await generateMmseqs2ComplexMsa(["ACDE", "ACDE"], {
+        fetchImplementation: async() => responses.shift(),
+        wait: async() => {}, decompress: async() => resultTar, model: "af2",
+      });
+    } catch (error) { message = error.message; }
+    expect(message).toContain("unknown model af2");
+  });
+
+  it("is block-diagonal by default", async() => {
+    const responses = [
+      new Response(JSON.stringify({ status: "COMPLETE", id: "ticket-homo" })),
+      new Response(new Uint8Array([1, 2, 3])),
+    ];
+    const fetchImplementation = vi.fn(async() => responses.shift());
+    const result = await generateMmseqs2ComplexMsa(["ACDE", "ACDE"], {
+      fetchImplementation, wait: async() => {}, decompress: async() => resultTar,
+    });
+    const parsed = parseA3m(result.a3m);
+    expect(parsed.sequences).toContain("AC-E----");
+    expect(parsed.sequences).toContain("----AC-E");
+    expect(parsed.sequences.includes("AC-EAC-E")).toBe(false);
+  });
+});
+
+describe("when the server does not answer as itself", () => {
+  const search = (respond) => generateMmseqs2Msa("ACDE", {
+    fetchImplementation: vi.fn(respond), wait: async () => {}, decompress: async () => { throw new TypeError("invalid gzip"); },
+  });
+  const failure = async (respond) => {
+    try {
+      await search(respond);
+    } catch (error) {
+      return error;
+    }
+    throw new Error("the search succeeded");
+  };
+
+  it("says who could not be reached, not what a fetch says", async () => {
+    const calls = vi.fn();
+    const error = await failure(async () => { calls(); throw new TypeError("Failed to fetch"); });
+    expect(error instanceof AlignmentServerError).toBe(true);
+    expect(error.message).toContain("api.colabfold.com");
+    expect(error.message.includes("Failed to fetch")).toBe(false);
+    expect(calls.mock.calls).toHaveLength(5);
+  });
+
+  it("does not wait after the last attempt", async () => {
+    const waits = [];
+    await generateMmseqs2Msa("ACDE", {
+      fetchImplementation: async () => new Response("boom", { status: 503 }),
+      wait: async (milliseconds) => { waits.push(milliseconds); },
+    }).catch(() => {});
+    expect(waits).toEqual([500, 1000, 2000, 4000]);
+  });
+
+  it("says that something else answered, not where JSON's parser tripped", async () => {
+    const error = await failure(async () => new Response("<html>a captive portal</html>"));
+    expect(error instanceof AlignmentServerError).toBe(true);
+    expect(error.message.includes("Unexpected token")).toBe(false);
+    expect(error.message).toContain("sign-in page");
+  });
+
+  it("reads a body of the wrong shape as a server that refused", async () => {
+    for (const body of ["null", "3", "[]", '"COMPLETE"']) {
+      // eslint-disable-next-line no-await-in-loop
+      const error = await failure(async () => new Response(body));
+      expect(error instanceof AlignmentServerError).toBe(true);
+      expect(error.message).toContain("rejected the sequence");
+    }
+  });
+
+  it("says the same of a result that does not unpack", async () => {
+    const responses = [new Response(JSON.stringify({ status: "COMPLETE", id: "t" })), new Response("<html></html>")];
+    const error = await failure(async () => responses.shift());
+    expect(error instanceof AlignmentServerError).toBe(true);
+    expect(error.message.includes("invalid gzip")).toBe(false);
+  });
+
+  it("does not read a Stop as a server's fault", async () => {
+    const controller = new AbortController();
+    const body = new Response(new ReadableStream({ start: (stream) => {
+      controller.signal.addEventListener("abort", () => stream.error(new DOMException("stopped", "AbortError")));
+    } }));
+    const searched = generateMmseqs2Msa("ACDE", { fetchImplementation: async () => body, signal: controller.signal });
+    setTimeout(() => controller.abort(), 0);
+    let error;
+    await searched.catch((caught) => { error = caught; });
+    expect(error?.name).toBe("AbortError");
+  });
+
+  it("leaves a sequence the reader has to correct as a plain error", async () => {
+    let error;
+    await generateMmseqs2Msa("AC1E", {}).catch((caught) => { error = caught; });
+    expect(error instanceof Error).toBe(true);
+    expect(error instanceof AlignmentServerError).toBe(false);
+  });
+});
+
+describe("re-merging a search for another model", () => {
+  // 🔴 THE SEARCH IS MODEL-INDEPENDENT AND THE MERGE IS NOT, which is the whole
+  // reason these are separable: changing the model must re-merge what is
+  // already here rather than repeat the one request this page makes off the
+  // machine. What it must NOT do is hand a model somebody else's construction.
+  const chainA3ms = [">q\nACDE\n>u\nACD-\n", ">q\nWYWY\n>u\nWY-Y\n"];
+  const sequences = ["ACDE", "WYWY"];
+  const pairedA3ms = new Map([["ACDE", ">q\nACDE\n>s\nAC-E\n"],
+    ["WYWY", ">q\nWYWY\n>s\nW-WY\n"]]);
+
+  it("gives each model its own chain merge from one search", () => {
+    const rows = (model) => parseA3m(mergeSearchedChains(
+      { sequences, chainA3ms, pairedA3ms, model }).a3m).sequences;
+    // AF3 is dense across chains; the monomer is block-diagonal and never
+    // paired. They must not come out the same.
+    expect(rows("af3")).toContain("AC-EW-WY");
+    expect(rows("monomer").includes("AC-EW-WY")).toBe(false);
+    expect(rows("monomer")).toContain("ACD-----");
+  });
+
+  it("refuses a model it has no merge for", () => {
+    expect(() => mergeSearchedChains({ sequences, chainA3ms, model: "nonesuch" }))
+      .toThrow(/unknown model/);
+  });
+
+  // 🔴 EVERY FOLDING FAMILY HAS ONE, AND THIS IS THE GATE THAT WAS MISSING.
+  // CHAIN_MERGES was four names typed out and `opendde` was never added, so
+  // asking for TWO COPIES of a chain under it threw "unknown model opendde:
+  // expected monomer, multimer, af3, openbind0" - a message naming a
+  // capability that model has. It shipped that way, and boltz2 and protenix2
+  // arrived the same way. The table is derived from AF3_FAMILIES now; this
+  // fails if a family is ever added that nothing can merge for.
+  it("has a merge for every family that can fold a complex", () => {
+    for (const family of FOLDING_FAMILIES) {
+      if (SINGLE_SEQUENCE_FAMILIES.includes(family)) continue;
+      // ...the family in the assertion rather than beside it: this harness's
+      // `expect` takes no message, so a bare not.toThrow() names nothing.
+      let thrown;
+      try { mergeSearchedChains({ sequences, chainA3ms, pairedA3ms, model: family }); }
+      catch (error) { thrown = `${family}: ${error.message}`; }
+      expect(thrown).toBe(undefined);
+    }
+  });
+
+  // ...and the AF3 lineage all merge the SAME way, which is why deriving the
+  // table from the family list is sound rather than merely convenient.
+  it("merges every AlphaFold 3-lineage family the way AlphaFold 3 does", () => {
+    const rows = (model) => parseA3m(mergeSearchedChains(
+      { sequences, chainA3ms, pairedA3ms, model }).a3m).sequences;
+    const af3 = rows("af3");
+    for (const family of AF3_FAMILIES) expect(rows(family)).toEqual(af3);
+  });
+
+  // 🔴 AND A DELTA FAMILY MERGES THE WAY ITS BASE DOES, WHICH IS A RULE ABOUT
+  // THE GRAPH AND NOT ABOUT THE NAME. `monomer-3` is model_3's weights on
+  // model_1's graph, so it reads an alignment exactly as `monomer` does and
+  // must never see a paired row; `multimer-4` must always see one. Written
+  // against every delta in the registry rather than the four that exist today.
+  it("merges every delta family the way its base does", () => {
+    const rows = (model) => parseA3m(mergeSearchedChains(
+      { sequences, chainA3ms, pairedA3ms, model }).a3m).sequences;
+    for (const [family, bundle] of Object.entries(MODEL_BUNDLES)) {
+      if (bundle.delta === undefined) continue;
+      expect(`${family}: ${rows(family)}`).toBe(`${family}: ${rows(graphFamily(family))}`);
+    }
+  });
+
+  it("drops the paired block for every monomer-graph family", () => {
+    for (const [family, bundle] of Object.entries(MODEL_BUNDLES)) {
+      if (graphFamily(family) !== "monomer" || bundle.delta === undefined) continue;
+      const { blocks } = mergeSearchedChains(
+        { sequences, chainA3ms, pairedA3ms, model: family });
+      expect(`${family}: ${blocks.paired}`).toBe(`${family}: null`);
+    }
+  });
+
+  it("drops the paired block for the monomer even when one was searched", () => {
+    // The AF2 monomer has no chain input, so a row spanning two chains would
+    // claim their residues coevolved - see CHAIN_MERGES. A cache filled by an
+    // AF3 fold must not leak paired rows into it.
+    const { blocks } = mergeSearchedChains({ sequences, chainA3ms, pairedA3ms, model: "monomer" });
+    expect(blocks.paired).toBe(null);
+  });
+});
+
+describe("reusing a search across folds", () => {
+  const complexCache = (chains, { paired = true } = {}) => ({
+    key: JSON.stringify(chains),
+    raw: {
+      chainA3ms: new Map(chains.map((c) => [c, `>q\n${c}\n`])),
+      ...(paired ? { pairedA3ms: new Map(chains.map((c) => [c, `>q\n${c}\n`])) } : {}),
+      depth: 12,
+    },
+  });
+
+  it("searches when there is nothing cached", () => {
+    expect(planSearchReuse({ cache: undefined, chains: ["AAAA"], family: "af3" }).reuse)
+      .toBe(false);
+  });
+
+  it("searches when the cache is for different chains", () => {
+    const cache = { key: JSON.stringify(["AAAA"]), raw: { single: {}, depth: 3 } };
+    expect(planSearchReuse({ cache, chains: ["CCCC"], family: "monomer" }).reuse).toBe(false);
+  });
+
+  it("reuses a one-chain search whole, whatever the model", () => {
+    const cache = { key: JSON.stringify(["AAAA"]), raw: { single: {}, depth: 3 } };
+    for (const family of ["monomer", "multimer", "af3"]) {
+      expect(planSearchReuse({ cache, chains: ["AAAA"], family }).reuse).toBe("single");
+    }
+  });
+
+  it("re-merges a complex rather than searching again when the model changes", () => {
+    const chains = ["AAAA", "CCCC"];
+    const cache = complexCache(chains);
+    expect(planSearchReuse({ cache, chains, family: "af3" }).reuse).toBe("merge");
+    expect(planSearchReuse({ cache, chains, family: "multimer" }).reuse).toBe("merge");
+  });
+
+  it("refuses a heteromer cache that was never paired", () => {
+    // 🔴 THE CASE THAT WOULD FOLD SILENTLY WRONG. A monomer search makes no
+    // paired request, so re-merging it for AF3 gives a complex with no paired
+    // rows - a worse prediction, not an error.
+    const chains = ["AAAA", "CCCC"];
+    const cache = complexCache(chains, { paired: false });
+    expect(planSearchReuse({ cache, chains, family: "af3" }).reuse).toBe(false);
+    expect(planSearchReuse({ cache, chains, family: "multimer" }).reuse).toBe(false);
+    // ...but the monomer wants no pairing, so the same cache serves it.
+    expect(planSearchReuse({ cache, chains, family: "monomer" }).reuse).toBe("merge");
+  });
+
+  it("treats a homomer as needing no pairing, so an unpaired cache serves it", () => {
+    const chains = ["AAAA", "AAAA"];
+    const cache = complexCache(chains, { paired: false });
+    expect(planSearchReuse({ cache, chains, family: "af3" }).needsPairing).toBe(false);
+    expect(planSearchReuse({ cache, chains, family: "af3" }).reuse).toBe("merge");
+  });
+
+  // 🔴 THE GRAPH DECIDES WHETHER A SEARCH MUST BE PAIRED. `monomer-3` asking
+  // for a paired block would re-run the one request this page makes off the
+  // machine, for rows its own merge then throws away.
+  it("asks for pairing by the graph a delta family runs, not by its name", () => {
+    const chains = ["AAAA", "CCCC"];
+    const cache = complexCache(chains, { paired: false });
+    for (const [family, bundle] of Object.entries(MODEL_BUNDLES)) {
+      if (bundle.delta === undefined) continue;
+      const monomer = graphFamily(family) === "monomer";
+      expect(`${family}: ${planSearchReuse({ cache, chains, family }).needsPairing}`)
+        .toBe(`${family}: ${!monomer}`);
+    }
+  });
+
+  it("keeps a one-chain result whole and a complex in parts", () => {
+    // 🔴 THE TWO SHAPES ARE WHY A MONOMER IGNORED "NO ALIGNMENT" FOR A
+    // WHILE. web/app.js takes a chain's alignment off by substituting a
+    // query-only block among the per-chain ones and re-merging, and it asked
+    // `searchCache.raw.chainA3ms !== undefined` first - which is FALSE for
+    // every one-chain job, because that shape keeps the result whole under
+    // `single`. So the commonest job there is skipped the opt-out without a
+    // word and folded with the alignment it had been told not to use.
+    //
+    // Pinned here rather than in the fold path because this is the fact that
+    // misleads: anything reaching for `chainA3ms` is reaching for a field a
+    // monomer's cache entry does not have.
+    const searched = { depth: 7, chainA3ms: new Map(), pairedA3ms: new Map(), text: "x" };
+    const one = searchCacheEntry({ chains: ["AAAA"], searched });
+    expect(Object.keys(one).sort()).toEqual(["depth", "single", "templateHits"]);
+    expect(one.chainA3ms).toBe(undefined);
+    expect(Object.keys(searchCacheEntry({ chains: ["AAAA", "CCCC"], searched })).sort())
+      .toEqual(["chainA3ms", "depth", "pairedA3ms", "templateHits"]);
+  });
+
+  it("merges a single chain that wants no alignment into its query alone", () => {
+    // ...which is what the fold path builds for that chain, and what makes
+    // the result fold as a single sequence: the query on row 0 and nothing
+    // under it. `singleSequenceIfOnlyQuery` then routes it to the path the
+    // "Single Sequence" mode already uses, template hits and all.
+    const sequence = "GWSTELEKHREELKEFLKKEG";
+    const merged = mergeSearchedChains({
+      sequences: [sequence],
+      chainA3ms: [`>101\n${sequence}\n`],
+      pairedA3ms: undefined,
+      model: "af3",
+    });
+    expect(foldsAsSingleSequence(merged.a3m, sequence)).toBe(true);
+  });
+
+  it("carries the template hits into the cache, for a complex as for a chain", () => {
+    // 🔴 THE COMPLEX DROPPED THEM, AND ONLY THE SECOND FOLD COULD TELL. The
+    // hits come out of the same tar as the alignment and are returned beside
+    // it, so the FIRST fold of a complex has them; the cache kept only the
+    // per-chain alignments, so a fold that reused the search had none - and a
+    // chain asking for a template "from the MSA search" was told the MSA was
+    // not a search. It was.
+    const hits = new Map([[0, [{ target: "1qys_A", id: "1qys", chain: "A" }]]]);
+    const searched = { depth: 7, chainA3ms: new Map(), pairedA3ms: new Map(),
+                       text: "x", templateHits: hits };
+    expect(searchCacheEntry({ chains: ["AAAA"], searched }).templateHits).toBe(hits);
+    expect(searchCacheEntry({ chains: ["AAAA", "CCCC"], searched }).templateHits).toBe(hits);
+  });
+});
+
+describe("a search over some of the chains, put back in the fold's order", () => {
+  // 🔴 A CHAIN WITH NO ALIGNMENT IS NOT SEARCHED FOR, so what comes back
+  // covers the KEPT chains in their own order while everything downstream
+  // counts chains the way the entity rows do. Every array involved is the
+  // right TYPE either way, so getting this wrong is silent: a chain quietly
+  // reads somebody else's alignment, or somebody else's template.
+  const A = "AAAA", B = "CCCC", C = "DDDD";
+
+  it("puts a query-only block where the chain asked for none", () => {
+    const out = expandSearchedChains({
+      chains: [A, B, C], off: [false, true, false],
+      parts: [">101\nAAAA\n>h\nAAAE\n", ">101\nDDDD\n>h\nDDDE\n"],
+    });
+    expect(out.chainA3ms[0]).toBe(">101\nAAAA\n>h\nAAAE\n");
+    expect(out.chainA3ms[1]).toBe(">101\nCCCC\n");        // its query alone
+    expect(out.chainA3ms[2]).toBe(">101\nDDDD\n>h\nDDDE\n");
+  });
+
+  it("renumbers the template hits from the request into the fold", () => {
+    // The request was [A, C]; hit 1 is C, which is chain 2 of the fold.
+    const hits = new Map([[0, [{ target: "1abc_A" }]], [1, [{ target: "2xyz_B" }]]]);
+    const out = expandSearchedChains({
+      chains: [A, B, C], off: [false, true, false],
+      parts: [">101\nAAAA\n", ">101\nDDDD\n"], templateHits: hits,
+    });
+    expect(out.templateHits.get(0)[0].target).toBe("1abc_A");
+    expect(out.templateHits.get(2)[0].target).toBe("2xyz_B");
+    expect(out.templateHits.has(1)).toBe(false);           // never searched for
+  });
+
+  it("keeps the paired block for a sequence any copy of which is aligned", () => {
+    // 🔴 THE PAIRED BLOCK IS PER SEQUENCE. Two chains that are the same
+    // protein share one entry, so writing both into a Map lets whichever
+    // comes last decide for both - and with one copy off, that silently
+    // took the alignment away from the copy that wanted it.
+    const paired = new Map([[A, ">101\nAAAA\n>h\nAAAE\n"]]);
+    const out = expandSearchedChains({
+      chains: [A, A], off: [false, true],
+      parts: [">101\nAAAA\n>h\nAAAE\n"], pairedA3ms: paired,
+    });
+    expect(out.pairedA3ms.get(A)).toBe(">101\nAAAA\n>h\nAAAE\n");
+    // ...and gone when every chain carrying it asked for none.
+    const none = expandSearchedChains({
+      chains: [A, A, B], off: [true, true, false],
+      parts: [">101\nCCCC\n"], pairedA3ms: new Map([[A, "x"], [B, "y"]]),
+    });
+    expect(none.pairedA3ms.get(A)).toBe(">101\nAAAA\n");
+  });
+
+  it("refuses a result that does not cover the chains that were kept", () => {
+    expect(() => expandSearchedChains({
+      chains: [A, B], off: [false, false], parts: [">101\nAAAA\n"],
+    })).toThrow(/covers 1 chains and 2 were kept/);
+  });
+});

@@ -1,0 +1,1328 @@
+<!--
+index.html
+----------
+AI Context: STANDALONE WEB APP ENTRY POINT
+- The main HTML file for the standalone web application.
+- Loads every source file directly, in the order tools/bundle.py declares.
+  A deployed page can load one bundle instead; see tools/bundle.py BUNDLES.
+- Defines the DOM structure for the viewer, sidebar, and controls.
+-->
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LocalFold</title>
+    <!-- No Tailwind. It was loaded from cdn.tailwindcss.com - an in-browser JIT
+         compiler that re-scans the DOM on every mutation, and warns in the
+         console that it is not for production - to supply EIGHT utility rules.
+         They are in src/app/style.css now, with Tailwind's own values. -->
+    <!-- JSZip library for handling zip file uploads -->
+    <!-- Neither this nor the icons below may hold the page up (PR #7, lhallee): a network that drops this host answers
+         nothing at all, and a head waits for what it asked - a blank page for 34 s. py2Dmol asks whether JSZip is there
+         when it needs it. -->
+    <script async src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <!-- canvas2svg is src/core/svg.js -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+        media="print" onload="this.media = 'all'"
+        xintegrity="sha512-SnH5WK+bZxgPHs44uWIX+LLMDJd4gYm4zQ6UvE6j3v/3Tf7U7T2Y9p6gJzU0bW5V6f6G6X6b6W6w6+g6w=="
+        crossorigin="anonymous" referrerpolicy="no-referrer" />
+    <link rel="stylesheet" href="./web/vendor/py2Dmol.app.css">
+    <link rel="stylesheet" href="./web/localfold.css">
+    <!-- WHAT THE STATUS LINE SAYS WITH NOTHING LOADED. py2Dmol's default names
+         two controls this page does not have. Set here rather than in the
+         module, because the app writes this message on load and again on every
+         clear, and an inline script in the head is the one place guaranteed to
+         run before the first of those. -->
+    <script>window.py2dmolReadyMessage = "Ready. Paste a sequence and press Fold.";</script>
+</head>
+
+<body class="bg-gray-50 text-gray-800 font-sans p-4">
+
+    <!-- Global Drop Overlay Element -->
+    <div id="global-drop-overlay">
+        <p><i class="fa-solid fa-cloud-arrow-up mr-3"></i> Drop File Anywhere to Load</p>
+    </div>
+    <!-- End Global Drop Overlay -->
+
+    <!-- .page-width is the shell: 600 (canvas) + 8 (gap) + 340 (panel). It
+         was written inline on four elements here, and AN INLINE WIDTH IS ONE
+         NO STYLESHEET CAN OVERRIDE - not a media query, not a container
+         query, not any specificity; only `!important`, and a page whose
+         responsive rules all need that has no cascade left. The number lives
+         once in py2Dmol.app.css and its narrow block overrides that one rule
+         instead of four attributes. -->
+    <div class="mx-auto page-width" style="position: relative;">
+        <!-- py2Dmol reads this setting during initialization. Keep its fast
+             WebGL2 painter enabled without exposing a GPU toggle that could be
+             mistaken for LocalFold's WebGPU inference backend. -->
+        <input type="checkbox" id="useGpuCheckbox" checked hidden aria-hidden="true">
+        <!-- JUST THE TITLE. The line under it said "Upload a PDB/CIF file, or
+             fetch by PDB or UniProt ID", which is a description of the two
+             controls directly beneath it: a box whose placeholder is an ID and
+             a button that says Upload. The chain suffixes it used to carry -
+             the only part of the syntax nobody can guess - are in that box's
+             placeholder now (1a3n_AB), where someone about to type an ID is
+             already looking. -->
+        <!-- 🔴 FOLD AND MSA LIVE IN THE PAGE HEAD, NOT IN THE INPUT BOX. This is
+             where py2Dmol keeps the controls that act on the whole page - its
+             save and clear-all sat here - and the entity list needs the full
+             width of the panel: with the buttons inside it, every row was cut
+             short by their column and the copies fields could not line up. -->
+        <div class="page-head page-head-fold" style="padding-right: 0;">
+            <h1>LocalFold</h1>
+            <div class="fold-actions">
+              <button type="button" id="add-entity" class="btn btn-grey btn-small">
+                <i class="fa-solid fa-plus"></i>
+                <span>Add entity</span>
+              </button>
+              <!-- 🔴 DISABLED UNTIL web/app.js HAS BOUND ITS HANDLER, which is
+                   later than it looks. py2Dmol.full.min.js is 765 KB of
+                   blocking classic script and app.js is a module, so it runs
+                   only after that has downloaded, parsed and executed - and the
+                   whole page, this button included, is on screen and
+                   interactive throughout. A click in that window used to do
+                   nothing at all: no error, no status, no feedback, and the
+                   reasonable conclusion is that the page is broken.
+                   Milliseconds on localhost, seconds over a network. -->
+              <button id="predict" class="btn btn-primary" disabled>
+                <i class="fa-solid fa-cubes"></i>
+                <span>Fold</span>
+              </button>
+            </div>
+        </div>
+
+        <!-- THE FOLD PANEL, in py2Dmol's own idiom: one row for what to fold,
+             one for the action, and the settings folded behind a button. Their
+             classes are reused rather than restyled, so this row and the rest of
+             the page stay the same page.
+
+             🔴 py2Dmol'S OWN FETCH PANEL IS STILL BELOW, HIDDEN, AND MUST STAY.
+             app/main.js binds listeners to #fetch-id, #fetch-btn,
+             #upload-button and the option toggles during initializeApp, and one
+             missing element throws inside setupEventListeners - which silently
+             aborts the REST of initializeApp. The symptom is not an error; it is
+             that the MSA panel never wires itself up. Hidden is safe. Deleted is
+             not. Our own ids are distinct from theirs for the same reason. -->
+        <div id="fold-panel" class="container-box page-width" style="margin-bottom: 10px;">
+          <div class="fetch-panel">
+            <!-- WHAT TO FOLD, AND WHAT TO DO WITH IT, on one line: the box
+                 grows, and everything that acts on it stacks to its right.
+                 py2Dmol's fetch row is the same shape, one row shorter. -->
+            <div class="fetch-row" id="fold-input-container">
+              <!-- WHAT TO FOLD, AS A LIST OF ENTITIES, which is AlphaFold
+                   Server's own model: a type, a value and a number of copies.
+                   It replaces the single colon-separated textarea because the
+                   colon notation cannot express a ligand at all - there is no
+                   sequence to write HEM as. The rows are built by
+                   web/entity-ui.js; this is only where they go.
+
+                   🔴 DNA AND RNA ARE AF3-ONLY, and web/app.js refuses AF2 for
+                   a nucleic chain rather than leaving a fold that looks like it
+                   worked: AF2 has no alphabet for one. The type list is in
+                   web/entities.js. A nucleotide is ONE token per residue,
+                   unlike a ligand or a modified residue. -->
+              <div class="entity-list">
+                <div id="entity-rows"></div>
+              </div>
+              <!-- 🔴 NO Options BUTTON. The settings below are always on
+                   screen: with three models to choose between, the one control
+                   that decides what the others mean cannot be behind a
+                   disclosure. The MSA switch moves up beside Fold, which is the
+                   row it belongs to - it changes what is folded, not how. -->
+            </div>
+
+            <!-- ...AND THE SETTINGS, in py2Dmol's own groups: a column each, a
+                 rule between them, and a title that says which question the
+                 column answers.
+
+                 THE ALIGNMENT INPUT IS NOT IN A COLUMN. A textarea inside one
+                 sets the column's width and pushes the rule off centre; on its
+                 own full-width line it takes the panel's width and the columns
+                 above keep their measure. -->
+            <div class="fetch-options" id="foldOptions">
+              <!-- 🔴 ONE ORDER FOR ALL THREE MODELS: Model, Recycles, Seed, and
+                   then whatever else the chosen model reads. Model comes first
+                   because it decides which of the rest apply; Recycles and Seed
+                   are next because every model has them. A control that moves
+                   when the model changes is a control the reader has to find
+                   again. -->
+
+              <!-- WHICH MODEL. Auto picks AF2 multimer as soon as the sequence
+                   has more than one chain, which is the only thing that
+                   distinguishes those two cases in practice; the explicit
+                   settings are there to fold the same input every way. -->
+              <div class="fetch-option-group" id="modelGroup">
+                <span class="fetch-option-title">Model</span>
+                <!-- 🔴 NO Auto, AND AF3 IS THE DEFAULT. Auto read the chain
+                     count and picked between the two AlphaFold 2 models, which
+                     silently made AF2 the default for everything and could
+                     never choose AF3 - so the newest model was the one you had
+                     to know to ask for. It also gave the page a state where
+                     what would run was not written anywhere on it. -->
+                <select id="model-family" title="Which model to fold with. AF3 is DeepMind's, under their own terms; OpenBind-0 is OpenFold3 v0.5.0, Apache 2.0; EF2-fast folds from a single sequence through a protein language model, with no alignment.">
+                  <option value="af3" selected>AF3</option>
+                  <!-- 🔴 THE SAME GRAPH, DIFFERENT PARAMETERS. OpenBind-0 runs
+                       through foldWithAf3 exactly as AF3 does; what differs is
+                       the bundle and the three dialect branches its weights
+                       were trained with. See shared/af3/dialect.js. -->
+                  <option value="openbind0">OpenBind-0</option>
+                  <!-- 🔴 TWO TOKEN SPACES, AND NO CONFIDENCE HEAD. OpenDDE
+                       re-tokenises each residue into a backbone and a sidechain
+                       subtoken between the trunk and the diffusion, which is a
+                       branch inside foldBatch rather than a second driver; and
+                       its confidence head is its own design, so a fold returns
+                       a structure and a contact map with no pLDDT or PAE - the
+                       same shape as EF2-fast. See docs/OPENDDE.md. -->
+                  <option value="opendde">OpenDDE</option>
+                  <!-- 🔴 AlphaFold 3's GRAPH AT TWO OTHER MODELS' WIDTHS. Both
+                       are AF3-lineage and neither is AlphaFold 3: Boltz-2's
+                       diffusion single conditioning projects to 768 where
+                       AF3's is 384, and its confidence head is eight
+                       pairformer blocks behind its own re-embedding module;
+                       Protenix-v2 concatenates its template features and
+                       applies one projection where AF3 runs nine. Both are
+                       read from the bundle rather than typed in - see
+                       shared/af3/dialect.js and docs/AF3.md. -->
+                  <option value="boltz2">Boltz-2</option>
+                  <option value="protenix2">Protenix-v2</option>
+                  <!-- Mol-1 (Molence Bio): Protenix-v2's model at a 448-channel pair, with eight PairMixer blocks
+                       (no triangle attention) and a 320-channel trunk between two width adapters. See
+                       shared/af3/dialect.js MOL1. -->
+                  <option value="mol1">Mol-1</option>
+                  <!-- 🔴 THE SMALLEST DIALECT AND THE WIDEST BUNDLE. Its module
+                       tree is stock AlphaFold 3's - the nine-projection
+                       template embedder and AF3's MSA stack - and the reference
+                       names it in exactly two convention tuples; what differs
+                       is its SHAPES, a 512-channel trunk pair against AF3's 128
+                       and a 256-channel template stack against 64. It is 612
+                       MiB, the largest bundle here, and its 5CAJ self-template
+                       is 0.256 A. -->
+                  <option value="intellifold2">IntelliFold-2</option>
+                  <!-- 🔴 STOCK AF3 SHAPES AND EIGHT FORWARD BRANCHES. c_z 128
+                       and four triangle-attention heads, so no widening - and
+                       then a 1/L in the triangle multiplication, a q/k
+                       LayerNorm in every diffusion attention, a block that
+                       shares one residual between attention and transition,
+                       biased grid and outer-product projections, and a
+                       confidence head that normalises its inputs over the whole
+                       tensor. It is the smallest bundle of the AF3 family at
+                       266 MiB. -->
+                  <option value="rosettafold3">RoseTTAFold3</option>
+                  <option value="monomer">AF2-mono</option>
+                  <option value="multimer">AF2-multi</option>
+                  <!-- 🔴 NO ALIGNMENT AND NO TEMPLATE, WHICH IS THE POINT.
+                       EF2-fast folds from ONE sequence through a protein
+                       language model, so it serves the case an MSA search
+                       cannot serve at all. It does have ligands, DNA and RNA,
+                       and a confidence head - Synthyra's, trained against the
+                       same frozen trunk biohub published, so its pLDDT, PAE
+                       and pTM are predicted rather than estimated. -->
+                  <!-- 🔴 ONE ENTRY FOR ESMFold2, AND THE VARIANT ROW SAYS WHICH. Its
+                       checkpoints differ in the language model, the trunk's
+                       depth and what they make of an alignment all at once, so
+                       they are one choice (the value is the 600M checkpoint's,
+                       which saved sessions and links name). -->
+                  <option value="ef2-fast-600m">ESMFold2</option>
+                  <!-- 🔴 AN EMULATOR, NOT ONLY A PREDICTOR, AND WITH NO CONFIDENCE HEAD.
+                       BioEmu2 (Microsoft Research, MIT) samples a structure or an
+                       equilibrium ensemble, and propagates a structure forward in
+                       time; its own graph is webgpu/bioemu2 (a PairMixer trunk and a
+                       dual-stream denoiser). Its rows below show with it. -->
+                  <option value="bioemu2">BioEmu2</option>
+                </select>
+              </div>
+
+              <!-- 🔴 ALPHAFOLD 2 IS FIVE MODELS, AND THIS PAGE OFFERED ONE.
+                   They are one training run continued five ways and people run
+                   all five and compare - which is what ColabFold does - so the
+                   number is a control rather than five menu entries. Models 2
+                   to 5 ship as a 43 MiB DELTA on model_1's 97, so switching
+                   costs the difference and not another whole model; see
+                   tools/pack_delta_model.py.
+
+                   🔴 AND 3, 4 AND 5 HAVE NO TEMPLATE EMBEDDER AT ALL - those
+                   checkpoints simply do not contain it - so choosing one
+                   refuses a template rather than ignoring the one it was
+                   given. Hiding a control does not change its value. -->
+              <div class="fetch-option-group" id="af2ModelGroup" hidden>
+                <span class="fetch-option-title">Model #</span>
+                <select id="af2Model">
+                  <option value="1" selected>1</option>
+                  <option value="2">2</option>
+                  <option value="3">3</option>
+                  <option value="4">4</option>
+                  <option value="5">5</option>
+                  <!-- 🔴 ALL FIVE IN ONE RUN, AND ONE SET OF FRAMES. AlphaFold's
+                       own pipeline runs the five and RANKS them, so folding one
+                       at a time and reading five status lines is the manual
+                       version of what the model expects. The passes of all five
+                       land on one object - 5 x (recycles + 1) frames on the play
+                       bar - superposed onto the first model's first pass, and
+                       the saved structure is the best pass of the best model.
+                       See af2Sweep; build_site.py trims a number the site
+                       cannot serve and the sweep reads the OPTIONS, so it
+                       follows. -->
+                  <option value="all">All 5</option>
+                </select>
+              </div>
+
+              <!-- 🔴 ALL THREE MODELS RECYCLE. AF3's embedder has always done
+                   `pair += prev_embedding(LayerNorm(recycled pair))`; what was
+                   missing was the loop driving it, which is now in
+                   webgpu/af3/fold.js. Each recycle is another whole trunk. -->
+
+              <!-- ...and an id, like every other group here. The narrow layout
+                   puts Model / Recycles / Seed on one line and the pairs below
+                   it on theirs, which means naming them - and a probe that has
+                   to report WHICH controls share a line cannot say
+                   ".fetch-option-group" twice and mean two different rows. -->
+              <div class="fetch-option-group" id="seedGroup">
+                <span class="fetch-option-title">Seed</span>
+                <input type="number" id="random-seed" value="0" min="0" max="2147483647" step="1"
+                  title="Random seed. AF2: MSA subsampling and masking. AF3: the diffusion sampler (Ramp is deterministic and ignores it).">
+              </div>
+
+              <div class="fetch-option-group" id="recyclesGroup">
+                <span class="fetch-option-title">Recycles</span>
+                <select id="recycles">
+                  <option value="0">0</option>
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <!-- 🔴 THREE BY DEFAULT, NOT ZERO. Every recycle is another
+                       whole trunk, so zero was the cheap answer rather than the
+                       right one - and it is the setting AlphaFold itself
+                       ships. -->
+                  <option value="3" selected>3</option>
+                  <option value="6">6</option>
+                  <option value="12">12</option>
+                  <option value="24">24</option>
+                </select>
+              </div>
+
+              <!-- 🔴 THE REFERENCE'S OWN CONVERGENCE STOP, WHICH THIS PAGE
+                   COULD NOT EXPRESS. AlphaFold's config ships
+                   `recycle_early_stop_tolerance` 0.0 for the monomer and 0.5
+                   for the MULTIMER (alphafold/model/config.py, CONFIG and
+                   CONFIG_MULTIMER; ColabFold's CLI defaults to None and leaves
+                   both alone) - and `recycleTolerance()` has always read a
+                   `#tolerance` element that did not exist, so every fold here
+                   ran every recycle. Measured: a 59-mer with its own 8076-row
+                   alignment stops at 2 passes of 4 at 0.5 A, 1424 ms -> 956,
+                   pLDDT 96.565 -> 96.666; a fold that has NOT settled runs all
+                   four either way. See docs/AF2.md. -->
+              <div class="fetch-option-group" id="toleranceGroup" hidden>
+                <span class="fetch-option-title">Early Stop</span>
+                <select id="tolerance">
+                  <!-- 🔴 THE NUMBER IS ANGSTROMS, AND 0.1 SHIPS SELECTED -
+                       the conservative end of a measured range. At 0.1 the
+                       converged fold above runs 3 passes of 4 (1424 ms -> 1198,
+                       pLDDT 96.565 -> 96.564, a thousandth) where 0.5 stops it
+                       at 2 and saves a third. A tenth of an angstrom between
+                       consecutive passes is a structure that has stopped
+                       moving, and a fold that has NOT settled is untouched:
+                       5CAJ from a single sequence and the multimer gate run all
+                       four passes at every value and return the identical
+                       checksum. 0.0 is every pass, for anyone who wants it.
+                       🔴 AND THE MULTIMER'S CHECKPOINT ASKS FOR 0.5 and gets
+                       0.1: one control for both models, and the difference is
+                       one more pass on a complex that has already settled. -->
+                  <option value="0">0.0</option>
+                  <option value="0.1" selected>0.1</option>
+                  <option value="0.5">0.5</option>
+                </select>
+              </div>
+
+
+              <!-- AF3'S OWN, AFTER THE SHARED ONES. web/app.js shows it with
+                   the model rather than leaving a control on screen that is
+                   quietly ignored. One sampler, so no sampler select: Flow was
+                   removed (docs/AF3.md, "Flow removed"). -->
+              <div class="fetch-option-group" id="af3CountGroup" hidden>
+                <span class="fetch-option-title" id="af3-count-label">Steps</span>
+                <select id="af3-count"></select>
+              </div>
+
+              <!-- 🔴 BioEmu2'S OWN ROWS, SHOWN WITH IT (syncBioemu2Controls). Its
+                   method token is "non-md" for a structure and "md" for an
+                   equilibrium ensemble; propagation is equilibrium sampling
+                   conditioned on a starting frame at a lag, chained. Its contacts
+                   are the entity list's Contact rows (bioemu2ContactsFromRows), not
+                   a box of their own. -->
+              <div class="fetch-option-group" id="bioemu2ModeGroup" hidden>
+                <span class="fetch-option-title">Mode</span>
+                <select id="bioemu2-mode" title="Structure: predict a structure (BioEmu2's non-MD mode). Equilibrium: sample its equilibrium ensemble (MD mode). Propagate: run time forward from a structure of this input, each step one lag.">
+                  <option value="structure" selected>Structure</option>
+                  <option value="equilibrium">Equilibrium</option>
+                  <option value="propagate">Propagate</option>
+                </select>
+              </div>
+              <div class="fetch-option-group" id="bioemu2SamplesGroup" hidden>
+                <span class="fetch-option-title">Samples</span>
+                <select id="bioemu2-samples" title="How many structures to sample, in batches of up to five through one trunk; each is a frame of the play bar, ordered along the ensemble's first principal component. Stop keeps the batches already finished.">
+                  <option value="1" selected>1</option>
+                  <option value="2">2</option>
+                  <option value="3">3</option>
+                  <option value="5">5</option>
+                  <option value="8">8</option>
+                  <option value="10">10</option>
+                  <option value="25">25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+              </div>
+              <div class="fetch-option-group" id="bioemu2PropagationGroup" hidden>
+                <span class="fetch-option-title">Lag (ns)</span>
+                <input type="number" id="bioemu2-lag" value="1" min="0.001" step="any" title="The time each propagation step advances, in nanoseconds.">
+                <span class="fetch-option-title">Steps</span>
+                <input type="number" id="bioemu2-propagation-steps" value="1" min="1" max="100" step="1" title="How many lag-time steps each trajectory takes.">
+                <span class="fetch-option-title">From</span>
+                <select id="bioemu2-propagate-from" title="The starting frame: the last BioEmu2 fold of this same input, or a PDB of it.">
+                  <option value="last" selected>Last fold</option>
+                  <option value="upload">PDB file</option>
+                </select>
+                <input type="file" id="bioemu2-x0-file" accept=".pdb" hidden>
+              </div>
+
+              <!-- MSA options on the right of the row -->
+              <!-- 🔴 THE MSA SWITCH IS THIS SELECT'S "Single Sequence", NOT A
+                   SEPARATE TOGGLE. Two controls for one decision could
+                   disagree - the toggle said off while the select still read
+                   the search option - and
+                   the reader had to look at both to know what would be sent
+                   anywhere.
+                   🔴 AND "Search" IS THE DEFAULT, WHICH IT DID NOT USED TO BE.
+                   The old default was `none`, on the reasoning that a fold
+                   reaching a remote service should be asked for rather than
+                   arrived at. What that actually produced was a page whose
+                   first answer is the model's WORST one - single-sequence -
+                   which misrepresents the model to everybody who does not know
+                   to change it. The remote call is named in the option text and
+                   in the footer badge, which switches to "MSA via colabfold.com"
+                   for this mode; PRIVACY_NOTE in web/app.js is the other half of
+                   this decision and the two must not drift. -->
+              <!-- 🔴 THE SAME SLOT AS THE MSA ROW, WHICH IS HIDDEN WHEN THIS
+                   SHOWS. This model has no alignment; what it has instead is a
+                   protein language model, and turning that off is its
+                   equivalent of folding from a single sequence. It is a
+                   SEPARATE control rather than a third option on the MSA row
+                   because web/app.js reads that row's values as alignment
+                   modes - see the note there about renaming them. -->
+              <!-- 🔴 THE VARIANT ROW: which ESMFold2 checkpoint, named by what
+                   differs - Fast or Full, and the ESM-C tower it folds from.
+                   The two 6B ones are biohub's released models and fold on a
+                   native backend only (`localfold serve`), shown when it says
+                   it has them (web/native-bridge.js). The MSA row stays beside
+                   it for the 6B two, which can read an alignment beside ESM-C (the
+                   released Fast as profile features, Full through its encoder):
+                   it starts at "ESM-C only" and a search or an upload is the
+                   reader's opt-in. The 600M and 300M checkpoints read ESM-C
+                   alone and have no MSA row. Every ESMFold2 folds from its
+                   language model, so "no language model" is not offered. The select keeps its id and values (plm-mode,
+                   esmc-*), which saved sessions and links carry. -->
+              <div class="fetch-option-group" id="plmGroup" hidden>
+                <span class="fetch-option-title">Variant</span>
+                <select id="plm-mode" title="Which ESMFold2: Fast or Full, and the protein language model it folds from. 300M is 94 MiB smaller than 600M for a median 0.03 A. The ESM-C 6B variants are biohub's released models (Fast reads an alignment's profile, Full encodes the alignment) and fold on a local native server. Every variant folds from its language model; the 6B two can also read an alignment, off by default.">
+                  <option value="esmc-600m" data-language-model="ESM-C 600M" selected>Fast · ESM-C 600M</option>
+                  <option value="esmc-300m" data-language-model="ESM-C 300M">Fast · ESM-C 300M</option>
+                  <option value="esmc-6b" data-language-model="ESM-C 6B" data-native-model="ef2-fast" hidden>Fast · ESM-C 6B</option>
+                  <option value="esmc-6b-full" data-language-model="ESM-C 6B" data-native-model="ef2" hidden>Full · ESM-C 6B</option>
+                </select>
+              </div>
+              <div class="fetch-option-group" id="msaModeGroup">
+                <span class="fetch-option-title">MSA</span>
+                <select id="msa-mode">
+                  <!-- 🔴 THE LABELS MOVED AND THE VALUES DID NOT. web/app.js
+                       reads "none" and "search" - and translates "none" to
+                       "single" for the driver - so renaming a value here
+                       silently changes which alignment a fold gets. -->
+                  <option value="none">Single Sequence</option>
+                  <option value="search" selected>MMseqs2</option>
+                  <option value="paste">Paste A3M</option>
+                  <option value="upload">Upload file</option>
+                  <!-- 🔴 AN ACTION IN A LIST OF STATES, AND IT NEVER STAYS
+                       SELECTED. The page has read an AlphaFold 3 job JSON
+                       since web/job-json.js existed and the only door was
+                       "Upload file" above, which is a control about
+                       ALIGNMENTS - so loading a job meant setting an
+                       alignment dial to hand over a file that is not an
+                       alignment, and nothing on the page said so. This says
+                       so. But a job is not an MSA mode: leaving it selected
+                       would make `msaMode()` answer with something that is
+                       not an answer, and the fold would run on it. web/app.js
+                       stashes the mode it replaced and puts it back the
+                       moment the file is read - or the job sets its own,
+                       when the file asks for no alignment. -->
+                  <option value="job">Load job JSON…</option>
+                </select>
+              </div>
+              <div class="fetch-option-group" id="maxMsaGroup">
+                <span class="fetch-option-title">Max MSA</span>
+                <select id="max-msa" title="MSA subsampling depth (clusters:extra sequences)">
+                  <option value="512:1024">512:1024</option>
+                  <option value="256:512">256:512</option>
+                  <option value="128:256" selected>128:256</option>
+                  <option value="64:128">64:128</option>
+                  <option value="32:64">32:64</option>
+                  <option value="16:32">16:32</option>
+                </select>
+              </div>
+
+              <div class="fold-option-wide">
+                <textarea id="msa-text" rows="3" spellcheck="false" aria-label="A3M alignment"
+                  placeholder="Paste A3M &#8212; the first record is the query" hidden></textarea>
+                <input id="msa-file" type="file" accept=".a3m,.fasta,.fa,.txt,.zip,.json" hidden />
+              </div>
+            </div>
+
+          </div>
+        </div>
+        <div id="upload-options-container" class="container-box page-width" style="margin-bottom: 10px;">
+
+            <!-- FETCH PANEL. Three lines, and the third is usually not there.
+                 It was a two-column table: an ID box and a Load button on the
+                 left, seven toggles standing open on the right, and the
+                 examples squeezed into half a column where four of them
+                 wrapped onto two rows. Everything about that layout was sized
+                 by the options, which are the part almost nobody changes -
+                 they are defaults, and a default that is right does not need
+                 to be on screen. So they fold behind a button and the row that
+                 matters gets the whole width. -->
+            <!-- 🔴 py2Dmol'S LOADER SETTINGS, NOT A PANEL. This was 138 lines
+                 of py2Dmol's own website chrome at `display: none` - a PDB/
+                 UniProt fetch row, four example buttons, an options disclosure
+                 and seven checkboxes - none of it reachable, because LocalFold
+                 offers prediction and py2Dmol.solab.org offers the viewer. What
+                 is left is the seven elements that are NOT decoration, each of
+                 which was measured against the bundle before it was kept.
+
+                 🔴 THREE OF THEM ARE READ WITHOUT A GUARD AT STARTUP, so
+                 deleting one throws inside `setupEventListeners` - which
+                 silently aborts the REST of `initializeApp` and takes the MSA
+                 panel's wiring with it. The symptom is not an error; it is a
+                 feature that never wired itself up.
+
+                 🔴 AND `#loadAsFramesCheckbox` IS ON OUR OWN FOLD PATH.
+                 `processFiles` - which `window.py2dmolLoadFiles` calls, which
+                 is how web/app.js puts a prediction on screen - reads
+                 `p.checked` with NO guard. Measured by deleting it: the fold
+                 still computes and the status line still reads "Done in 1.2 s
+                 · pLDDT 64.2 · pTM 0.338", and the structure never arrives -
+                 "Error processing af#_#.pdb: Cannot read properties of null
+                 (reading 'checked')". A right answer nobody can see.
+
+                 🔴 AND `#fetch-id` IS A FLAG, NOT A BOX - KEPT ON A READING,
+                 WHICH IS WEAKER EVIDENCE AND IS SAID SO ON PURPOSE. The bundle
+                 computes `isIndexHTML = getElementById("fetch-id") !== null &&
+                 getElementById("fetch-uniprot-id") === null` once at load, and
+                 that flag is the only thing gating `initializeMSAIndex()`,
+                 which wires `#msaChainSelect` and `#msa-buttons`. Deleting it
+                 was TRIED and changed nothing observable: a single-chain fold
+                 with a 128-row search is identical either way, because the
+                 chain selector that function fills hides itself below two
+                 chains and LocalFold prints its own "Loaded MSAs" line. So the
+                 falsification is missing, not passed - a two-chain fold is
+                 where it would show. One line to keep, and the cost of being
+                 wrong is an MSA panel that quietly stops wiring itself up.
+
+                 The other two carry their `checked` state because absence and
+                 unchecked are not the same answer: `alignFrames` reads
+                 `!!m && m.checked` and `loadMSA` reads `!!u && u.checked`, so
+                 both default to FALSE when the element is gone and TRUE as
+                 written here. `loadPAECheckbox` reads `!d || d.checked` and so
+                 means the same thing absent - which is why it is not here.
+                 Removed with it and for the same reason: `biounitCheckbox`,
+                 `loadLigandsCheckbox` and `filterAdditivesCheckbox`, whose
+                 values `initializeViewerConfig` hard-codes as defaults anyway,
+                 and `alignChainInput`, read as `?.value || ""`.
+
+                 Do not "tidy" any of this away without re-reading the bundle:
+                 every line here is a measurement. -->
+            <div class="fetch-panel" style="display: none;" aria-hidden="true">
+                <input type="text" id="fetch-id">
+                <button id="fetch-btn" type="button"></button>
+                <button id="upload-button" type="button"></button>
+                <input type="file" id="file-upload">
+                <input type="checkbox" id="loadAsFramesCheckbox" checked>
+                <input type="checkbox" id="alignFramesCheckbox" checked>
+                <input type="checkbox" id="loadMSACheckbox" checked>
+            </div>
+
+            <!-- STATUS AND PROGRESS ARE ONE BLOCK, AND IT NEVER CHANGES HEIGHT.
+                 The bar used to live at the foot of the fold panel with a
+                 `hidden` attribute, so every fold grew that panel by 11px and
+                 shoved the viewer, the sequence strip and the panels below it
+                 down - then pulled them back up on completion. It is a
+                 permanent 3px rule under the status line now: flat and grey
+                 when there is nothing to report, filled while a fold runs. The
+                 element is always laid out, so nothing below it ever moves. -->
+            <div id="status-row">
+                <!-- THE LINE AND THE DIAL SHARE A ROW, the bar keeps its own.
+                     The weights download and the MSA search run at the same
+                     time now, so the one status line cannot narrate both: the
+                     line is the fold's, the dial is the download's. -->
+                <div id="status-line">
+                    <div id="status-message"></div>
+                    <div id="model-load" hidden>
+                        <span id="model-load-text"></span>
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <circle class="model-load-track" cx="12" cy="12" r="9"></circle>
+                            <!-- Rotated so the arc starts at twelve o'clock;
+                                 an SVG circle's path begins at three. -->
+                            <circle class="model-load-fill" cx="12" cy="12" r="9"
+                                    transform="rotate(-90 12 12)"></circle>
+                        </svg>
+                    </div>
+                </div>
+                <progress id="progress" max="1" value="0" data-state="idle"></progress>
+            </div>
+
+            <!-- 🔴 OUTSIDE #viewer-container, WHICH IS display:none UNTIL A FOLD
+                 FINISHES. A restore offer that only appears after you fold is
+                 an offer to the one person who does not need it. This sits
+                 under the status line, which is on screen from load.
+
+                 ONE FOLD, NOT A LIST. py2Dmol already does multi-object - the
+                 picker, prev/next and Multi are further down the page - so a
+                 list here would be a second selector for the same set. What
+                 the page cannot do without this is survive a reload. -->
+            <div id="session" class="session-row" hidden>
+                <span id="session-text"></span>
+                <button id="session-restore" class="btn btn-secondary btn-small"
+                    title="Put this fold back on screen. Its alignment was not
+                           saved, so folding again will search afresh.">
+                    <i class="fa-solid fa-rotate-left"></i><span>Restore</span>
+                </button>
+                <button id="session-forget" class="btn btn-grey btn-small"
+                    title="Forget the saved fold">
+                    <i class="fa-solid fa-xmark"></i><span>Forget</span>
+                </button>
+            </div>
+        </div>
+
+        <div id="viewer-container" class="py2dmol-viewer-instance" style="display: none;">
+
+            <div id="mainContainer">
+
+                <div id="viewerColumn">
+                    <!-- data-autosize="css": THE STYLESHEET OWNS THIS BOX, so
+                         py2Dmol's setupViewport writes no inline width and a
+                         media query can reach it. Without it every rule aimed
+                         at this box loses to an attribute set at load, and the
+                         failure reads as a media query that is not matching. -->
+                    <div id="canvasContainer" class="container-box" data-autosize="css">
+                        <canvas id="canvas"></canvas>
+                        <!-- Resize handle -->
+                        <div class="resize-handle"></div>
+                    </div>
+                    <div id="controlsContainer" class="container-box">
+                        <button id="playButton" class="btn btn-secondary btn-icon-only"><i
+                                class="fa-solid fa-play"></i></button>
+                        <input type="range" id="frameSlider" min="0" max="0" value="0">
+                        <span id="frameCounter">0 / 0</span>
+                        <button id="speedButton" class="btn btn-grey btn-icon-only"
+                            title="Cycle playback speed">1x</button>
+                        <button id="overlayButton" class="btn btn-secondary" title="Overlay all frames"
+                            style="font-weight: 400;">⧉</button>
+                    </div>
+                </div>
+
+                <!-- Right side panels container -->
+                <div id="rightPanelsContainer">
+                    <div id="rightPanelContainer" class="container-box">
+
+                        <!-- Toolbar (two rows) -->
+                        <div id="navigationControls" class="toolbar" style="margin-bottom: 4px;">
+                            <div class="toolbar-row">
+                                <label class="btn-toggle btn-flex" id="orientToggle" title="Orient to best view">
+                                    <input type="checkbox" style="display: none;">
+                                    <span><i class="fa-solid fa-crosshairs"></i>Orient</span>
+                                </label>
+
+                                <!-- FOCUS IS A LATCH, so it says aria-pressed
+                                     rather than aria-expanded - the shared rule
+                                     in style.css lights either. Beside Orient
+                                     because the two are the camera moves a
+                                     CLICK makes: Orient frames everything,
+                                     Focus moves in on one thing.
+                                     NOT crosshairs: Orient wears those, right
+                                     beside it. A magnifier is what the mode
+                                     does - look closely at one thing - and it
+                                     is the only one on the page, so it cannot
+                                     be read as search. -->
+                                <button id="focusButton" class="btn-toggle btn-flex"
+                                    aria-pressed="false"
+                                    title="Click a residue or ligand to draw its neighbours' side chains, move in on it and clip around it. The view does not turn. Click the background to come back out.">
+                                    <span><i class="fa-solid fa-magnifying-glass"></i>Focus</span>
+                                </button>
+
+                                <!-- Rotate: checkbox styled as a button -->
+                                <label class="btn-toggle btn-flex" id="rotateToggle" title="Toggle auto-rotation">
+                                    <input type="checkbox" id="rotationCheckbox">
+                                    <span><i class="fa-solid fa-rotate"></i>Rotate</span>
+                                </label>
+
+
+                            </div>
+
+                            <div class="toolbar-row">
+                                <button id="styleToggle" class="btn-toggle btn-flex"
+                                    aria-expanded="false" aria-controls="stylePanel"
+                                    title="Render style and its settings">
+                                    <span><i class="fa-solid fa-palette"></i>Style</span>
+                                </button>
+
+                                <!-- Clip: PyMOL's near/far slab, cutting the drawing. -->
+                                <label class="btn-toggle btn-flex" id="clipToggle"
+                                    title="Clip the view to a slab, as in PyMOL: near and far planes that cut the drawing">
+                                    <input type="checkbox" id="clipCheckbox">
+                                    <span><i class="fa-solid fa-cube"></i>Clip</span>
+                                </label>
+
+                                <button id="saveImageButton" class="btn-toggle btn-flex"
+                                    aria-expanded="false" aria-controls="savePanel"
+                                    title="Capture an image or a video">
+                                    <span><i class="fa-solid fa-camera"></i>Capture</span>
+                                </button>
+                            </div>
+                        </div>
+
+
+                        <!-- WHICH OBJECT, and how many. Directly under the
+                             buttons because everything below it - Style, Clip,
+                             Capture - acts on the object named here: pick an
+                             object and the panels below describe THAT object.
+                             Multi puts every object on screen at once; the
+                             eyes decide what is drawn and the picker still
+                             decides which one you are editing. -->
+                        <!-- OBJECTS: ONE AT A TIME, WHICH ON THIS PAGE IS THE
+                             ONLY HONEST MODE.
+                             The picker chooses which prediction run is on
+                             screen and being edited. py2Dmol also has MULTI -
+                             a button that opens a list of eyes and draws
+                             several objects merged into one array - and it is
+                             deliberately NOT MOUNTED here.
+
+                             🔴 EVERYTHING ELSE ON THIS PAGE DESCRIBES ONE
+                             FOLD. The scores card is `lastPrediction`'s, the
+                             heatmap panel is `viewerObject`'s, and both
+                             download buttons write the archive of a single
+                             run - so with two runs merged the card states one
+                             fold's pLDDT over a picture of two, and the panel
+                             goes altogether, because a merge of two objects
+                             has no PAE by construction (see _mergeObjects).
+                             Multi is a mode this page's own chrome cannot
+                             describe, and comparing two runs is what the
+                             picker is for.
+
+                             REMOVED, NOT HIDDEN, so there is no state to get
+                             wrong - the same choice py2Dmol's own render.html
+                             makes about the toolbar buttons it cannot honour.
+                             Every consumer in src/app/objects.js already
+                             guards on the button being absent
+                             (`if (!btn || !list ...) return`), so what is lost
+                             is the feature and not the page. -->
+                        <div id="objectRow" class="toggle-item object-row">
+                            <!-- WHICH OBJECT: the picker, and the only way to
+                                 choose one here. It names the object on screen AND
+                                 the one being edited, which on this page are always
+                                 the same object. Every other path drives the current
+                                 object through this select: the renderer's change
+                                 listener, the prev/next buttons, a restored session.
+                                 With the Multi button gone this is all the row holds,
+                                 so py2Dmol hides the row itself until there is more
+                                 than one object to pick - which is what a page with a
+                                 single prediction should show. -->
+                            <select id="objectSelect" class="object-picker"
+                                title="Which object to show and edit"
+                                style="min-width: 110px; height: 28px; font-size: 12px; padding: 0 8px;">
+                                <!-- Initially empty -->
+                            </select>
+                        </div>
+
+                        <style>
+                            /* Inline display:flex on the style rows outranks the UA [hidden]
+                               rule, so force it. Scoped to the style panel + its trigger. */
+                            #styleAppearanceContainer [hidden] { display: none !important; }
+                            /* Open cue is the shared .btn-toggle[aria-expanded] rule
+                               in style.css - the same green as a checked toggle. */
+                        </style>
+                        <!-- CLIP PANEL. PyMOL's clip: a slab in camera space, set as a
+                             RANGE - two knobs on one track, far on the left and near on
+                             the right, which cannot cross. No figures: where the knobs
+                             are IS the answer, and the picture shows the rest.
+                             Switching Clip off puts the panel away and LEAVES the cut;
+                             AUTO is what re-cuts: it fits the slab to the selection,
+                             and with nothing selected that is the uncut rest state -
+                             which is what the button used to say Reset for. -->
+                        <style>
+                            /* [hidden] is a UA rule and an inline display:flex outranks
+                               it - the same trap the style panel documents below. */
+                            #clipPanel[hidden] { display: none !important; }
+                            /* THE TWO HANDLES SHARE ONE TRACK. Both inputs sit on the
+                               same line, transparent, so what you see is the track drawn
+                               underneath and the two thumbs on it. pointer-events are
+                               off for the input body and back on for the thumb, or the
+                               upper input would swallow every click meant for the lower
+                               one. */
+                            /* TWO IDS, DELIBERATELY. src/app/style.css styles every range
+                               input in the viewer with
+                               `.py2dmol-viewer-instance input[type="range"]:not(#frameSlider)`,
+                               and :not(#frameSlider) counts an ID - so that rule outranks
+                               a single-id selector here and kept painting its own 6px grey
+                               bar and its own blue thumb. That bar on top of this one is
+                               the "two bars" this control was showing. */
+                            #clipPanel #clipRange { position: relative; height: 24px; flex: 1; min-width: 0; }
+                            #clipPanel #clipRange .track {
+                                position: absolute; left: 0; right: 0; top: 10px; height: 4px;
+                                background: #e5e7eb; border-radius: 2px;
+                            }
+                            #clipPanel #clipRange .span {
+                                position: absolute; top: 10px; height: 4px;
+                                background: #2563eb; border-radius: 2px;
+                            }
+                            #clipPanel #clipRange input[type=range] {
+                                position: absolute; left: 0; top: 0; width: 100%; height: 24px;
+                                margin: 0; padding: 0; background: transparent; pointer-events: none;
+                                border-radius: 0; outline: none;
+                                -webkit-appearance: none; appearance: none;
+                            }
+                            /* the track each input paints for itself, out of the way */
+                            #clipPanel #clipRange input[type=range]::-webkit-slider-runnable-track {
+                                background: transparent; border: none; height: 24px;
+                            }
+                            #clipPanel #clipRange input[type=range]::-moz-range-track {
+                                background: transparent; border: none; height: 24px;
+                            }
+                            #clipPanel #clipRange input[type=range]::-moz-range-progress {
+                                background: transparent;
+                            }
+                            #clipPanel #clipRange input[type=range]::-webkit-slider-thumb {
+                                pointer-events: auto; -webkit-appearance: none; appearance: none;
+                                width: 14px; height: 14px; margin-top: 5px; border-radius: 50%;
+                                background: #fff; border: 2px solid #2563eb; box-shadow: none;
+                                cursor: pointer;
+                            }
+                            #clipPanel #clipRange input[type=range]::-moz-range-thumb {
+                                pointer-events: auto; width: 14px; height: 14px; border-radius: 50%;
+                                background: #fff; border: 2px solid #2563eb; box-shadow: none;
+                                cursor: pointer;
+                            }
+                        </style>
+                        <!-- TWO LINES: the planes, then how soft they are. Each row
+                             spells out flex-direction ROW - the panel is a COLUMN and
+                             .control-group is one too, and inheriting that once stacked
+                             the readouts above a track with no width at all: the handles
+                             were there and unusable. -->
+                        <div id="clipPanel" hidden class="control-group"
+                            style="display: flex; flex-direction: column; align-items: stretch; gap: 6px; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; padding: 8px; margin-bottom: 4px;">
+                            <div style="display: flex; flex-direction: row; align-items: center; gap: 8px;">
+                                <label for="clipNear" class="font-medium text-gray-700"
+                                    style="width: 34px; font-size: 11px; flex-shrink: 0;"
+                                    title="Drag the two knobs to clip the view between them">Clip:</label>
+                                <div id="clipRange" title="Drag the two knobs to clip the view between them">
+                                    <div class="track"></div>
+                                    <div class="span" id="clipSpan"></div>
+                                    <input type="range" id="clipFar" aria-label="Far clipping plane">
+                                    <input type="range" id="clipNear" aria-label="Near clipping plane">
+                                </div>
+                                <button id="clipAutoButton" class="btn btn-grey btn-small"
+                                    title="Fit the slab to the selection - or uncut, with nothing selected"
+                                    style="font-size: 11px;">Auto</button>
+                            </div>
+                            <div style="display: flex; flex-direction: row; align-items: center; gap: 8px;">
+                                <label for="clipFadeSlider" class="font-medium text-gray-700"
+                                    style="width: 34px; font-size: 11px; flex-shrink: 0;"
+                                    title="Soft edge: how far outside each plane the drawing fades out instead of stopping. 0 is a hard cut.">Fade:</label>
+                                <input type="range" id="clipFadeSlider" min="0" max="100" value="10" step="5"
+                                    style="flex: 1; min-width: 0; outline: none;"
+                                    title="Soft edge: how far outside each plane the drawing fades out instead of stopping. 0 is a hard cut.">
+                                <!-- Auto stands over this space on the row above; without
+                                     it the two tracks would end in different places, which
+                                     is the whole reason the rows were split. -->
+                                <span aria-hidden="true" id="clipResetSpacer"
+                                    style="width: 51px; flex-shrink: 0;"></span>
+                            </div>
+                        </div>
+
+                        <div id="styleAppearanceContainer" class="control-group">
+
+                            <!-- The Style panel is BUILT by parts/panel.js and inserted here by
+                                 ui.js. It used to be written out in full in this file AND again
+                                 in the other page, under a note saying to edit both - which had
+                                 already been missed in both directions. -->
+                            <div id="stylePanelMount"></div>
+
+
+
+                        </div>
+
+
+                    </div>
+
+                    <!-- SELECTION PANEL. These tools act on the 3D structure,
+                         not on the sequence, and a selection can just as well be
+                         made by clicking the canvas or the PAE map - so their
+                         home in the sequence header was never quite right. Here
+                         they sit beside the thing they change.
+
+                         IT IS BUILT AT RUNTIME by py2Dmol's parts/panel.js, the
+                         way the Style panel above it is, and this element says
+                         only WHERE it goes. It used to be two hundred and
+                         eighty lines of markup pasted here from py2Dmol's own
+                         index.html - a second copy of a panel that grows rows,
+                         which is the thing that copy existed to make hard. The
+                         bundle carries the rows, the wiring AND the stylesheet
+                         now; what this page still owns is the layout slot. -->
+                    <div id="selectionPanelMount"></div>
+
+                    <!-- THE HEATMAP PANEL, which used to be the PAE panel and
+                         draws any map now - PAE and the trunk's contact map,
+                         picked with a tab strip.
+
+                         🔴 THE NEW IDS, AND THE RENAME IS NOT COSMETIC. The
+                         panel's JS still accepts #paeContainer/#paeCanvas, so
+                         the old names looked fine - but the vendored
+                         STYLESHEET has no rule for them at all, and the tab
+                         strip is absolutely positioned. Without
+                         `position: relative` here it escapes to the nearest
+                         positioned ancestor, .py2dmol-viewer-instance, and is
+                         drawn somewhere else on the page; the container also
+                         loses its 340px, its square aspect and its overflow
+                         clip, and the canvas its absolute fill. Accepted by
+                         the code and unstyled by the CSS is exactly the shape
+                         of bug that looks like it works. -->
+                    <div id="heatmapContainer" class="container-box" style="display: none;">
+                        <canvas id="heatmapCanvas" style="cursor: crosshair;"></canvas>
+                    </div>
+
+                    <!-- A BioEmu2 ENSEMBLE'S PCA, on py2Dmol's own scatter plot: one point a
+                         sample, the frame on screen highlighted, a click jumps to it. Hidden
+                         until a fold's frames carry points (showEnsembleScatter in web/app.js). -->
+                    <div id="scatterContainer" class="container-box" style="display: none; position: relative;">
+                        <canvas id="scatterCanvas" style="cursor: pointer;"></canvas>
+                    </div>
+
+                    <!-- THE RAW PREDICTION, under the confidence it describes.
+                         py2Dmol's own Save writes a session - the view, the
+                         selections, what is on screen. These two write what the
+                         MODEL produced: the structure and its scores. Different
+                         things, so they are not the same button, and this is
+                         where a reader looking at pLDDT and PAE already is. -->
+                    <!-- Prediction scores card -->
+                    <div id="predictionScoresBox" class="container-box" style="display: none;">
+                        <!-- 🔴 NO TITLE AND NO BADGE. Every cell here is
+                             labelled, so a heading over them said only that
+                             scores are scores; and the badge named the frame
+                             ("Pass 16", "flow_12"), which the trajectory's own
+                             play bar already says. Both cost the width that
+                             keeps the metrics on one line. -->
+                        <div class="scores-card-grid" id="scoresCardGrid">
+                            <div class="score-metric-cell">
+                                <div class="score-metric-label">pLDDT</div>
+                                <div id="metricMeanPlddt" class="score-metric-value">-</div>
+                            </div>
+                            <div class="score-metric-cell">
+                                <div class="score-metric-label">pTM</div>
+                                <div id="metricPtm" class="score-metric-value">-</div>
+                            </div>
+                            <div id="metricIptmCell" class="score-metric-cell" style="display: none;">
+                                <div class="score-metric-label">ipTM</div>
+                                <div id="metricIptm" class="score-metric-value">-</div>
+                            </div>
+                            <div id="metricMultimerCell" class="score-metric-cell" style="display: none;">
+                                <div class="score-metric-label">Ranking</div>
+                                <div id="metricMultimer" class="score-metric-value">-</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- THE RAW PREDICTION, under the confidence it describes.
+                         py2Dmol's own Save writes a session - the view, the
+                         selections, what is on screen. These two write what the
+                         MODEL produced: the structure and its scores. Different
+                         things, so they are not the same button, and this is
+                         where a reader looking at pLDDT and PAE already is. -->
+                    <div id="downloads" class="container-box" style="display: none;">
+                        <button id="download-pdb" class="btn btn-secondary"
+                            title="Download the predicted structure">
+                            <i class="fa-solid fa-download"></i><span>PDB</span>
+                        </button>
+                        <button id="download-all" class="btn btn-secondary"
+                            title="Download everything this fold used and produced,
+                                   as a zip in the AlphaFold 3 server's layout:
+                                   structure, scores, contacts, the request, and
+                                   one alignment per chain. Drop the zip back on
+                                   the alignment upload box to fold again with
+                                   exactly these alignments.">
+                            <i class="fa-solid fa-download"></i><span>All</span>
+                        </button>
+                        <!-- ...AND THE VIEWER'S SESSION, py2Dmol's own format:
+                             every object, frame, map, colour, selection and
+                             the camera. It opens on py2dmol.solab.org, where
+                             the same button sits in the page's upper-right
+                             corner, and back here through the upload box. No JS
+                             of ours: the vendored bundle wires any
+                             #saveStateButton to saveViewerState. -->
+                        <button id="saveStateButton" class="btn btn-secondary" type="button"
+                            title="Save everything the viewer is showing as a py2Dmol session (.json): every fold, its frames, maps, colours, selections and the camera. Opens on py2dmol.solab.org.">
+                            <i class="fa-solid fa-floppy-disk"></i><span>Session</span>
+                        </button>
+                    </div>
+
+                    <!-- 🔴 THE CONFIDENCE TRACE'S BOX, WHICH IS HALF OF TURNING IT
+                         ON. py2Dmol's panel finds its own DOM and does nothing
+                         at all until this exists - so the call in web/app.js's
+                         revealViewer is inert without it, silently, because a
+                         panel with no container returns null rather than
+                         throwing. The other half is the vendored bundle: the
+                         panel has to BE in it. Both or neither.
+                         Every structure on this page is a prediction, which is
+                         why we ask for a plot py2Dmol's own site does not
+                         offer - there a B-factor column would be titled pLDDT. -->
+                    <div id="plddtContainer" class="container-box" style="display: none;"></div>
+
+                    <!-- Scatter Plot Container (mirrors main viewer sizing; JS sets dimensions) -->
+                    <div id="scatterContainer" class="container-box" style="display: none; position: relative;">
+                        <canvas id="scatterCanvas" style="cursor: pointer;"></canvas>
+                        <div class="resize-handle" aria-label="Resize scatter plot"></div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Sequence container with box and toggle -->
+        <div id="sequence-viewer-container" class="container-box sequence-section-container page-width"
+            style="display: none;">
+            <div id="sequenceHeader" class="sequence-header">
+                <!-- Left side: Mode dropdown -->
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <select id="sequenceModeSelect" class="btn btn-grey btn-small"
+                        style="min-width: 100px; height: 28px; font-size: 12px; padding: 0 8px;">
+                        <option value="sequence" selected>Sequence</option>
+                        <option value="chain">Chain</option>
+                    </select>
+<!-- The object picker lives beside the Multi button, in the
+                         Objects row - see #objectRow. -->
+                </div>
+
+                <!-- WHICH FILE THIS FRAME CAME FROM, in the gap between the mode
+                     dropdown and the buttons. Loading a folder of predictions as
+                     frames gives one object and a frame number; this says which
+                     file you are looking at. Empty when the frames have no names
+                     of their own (a single structure, or a session from before
+                     they were kept). -->
+                <div id="frameNameLabel"
+                    style="flex: 1; min-width: 0; text-align: center; font-size: 12px; color: #6b7280; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></div>
+
+                <!-- Action buttons aligned to the right -->
+                <div class="sequence-actions" style="margin-left: auto;">
+                    <!-- These CREATE a selection, so they cannot live in the
+                         selection panel - that panel only exists once there is
+                         one. They stay next to the strip you select in. -->
+                    <span id="selectionGlobalTools" class="selection-global-tools">
+                        <button id="selectAllResidues" class="btn btn-grey btn-small"
+                            title="Select every residue">Select all</button>
+                        <button id="clearAllResidues" class="btn btn-grey btn-small"
+                            title="Clear the selection">Unselect</button>
+                        <button id="invertSelection" class="btn btn-grey btn-small"
+                            title="Select everything that is not selected now">Invert</button>
+                    </span>
+                </div>
+            </div>
+            <div id="sequenceView" class="sequence-content hidden"></div>
+        </div>
+
+        <!-- MSA container with box and toggle -->
+        <div id="msa-buttons" class="sequence-section-container" style="display: none;">
+            <div id="msaHeader" class="sequence-header">
+                <!-- Left side: Mode dropdown, Save buttons, Sort checkbox, Bit-score checkbox -->
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <select id="msaModeSelect" class="btn btn-grey btn-small"
+                        style="min-width: 100px; height: 28px; font-size: 12px; padding: 0 8px;">
+                        <option value="msa" selected>MSA</option>
+                        <option value="pssm">PSSM</option>
+                        <option value="logo">Logo</option>
+                        <option value="coverage">Coverage</option>
+                    </select>
+                    <div id="msaSaveContainer" style="display: none; align-items: center; gap: 4px;">
+                        <button id="msaSaveFastaButton" class="btn btn-grey btn-small" style="font-size: 11px;">Save
+                            Fasta</button>
+                    </div>
+                    <div id="logoSaveContainer" style="display: none; align-items: center; gap: 4px;">
+                        <button id="logoSaveSvgButton" class="btn btn-grey btn-small" style="font-size: 11px;">Save
+                            SVG</button>
+                    </div>
+                    <div id="pssmSaveContainer" style="display: none; align-items: center; gap: 4px;">
+                        <button id="pssmSaveSvgButton" class="btn btn-grey btn-small" style="font-size: 11px;">Save
+                            SVG</button>
+                        <button id="pssmSaveCsvButton" class="btn btn-grey btn-small" style="font-size: 11px;">Save
+                            CSV</button>
+                    </div>
+                    <div id="msaSortContainer" style="display: flex; align-items: center; gap: 4px;">
+                        <label for="msaSortCheckbox"
+                            style="font-size: 12px; color: #666; white-space: nowrap; display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                            <input type="checkbox" id="msaSortCheckbox" checked style="cursor: pointer;">
+                            <span>Sort</span>
+                        </label>
+                    </div>
+                    <div id="logoBitScoreContainer" style="display: none; align-items: center; gap: 4px;">
+                        <label for="logoBitScoreCheckbox"
+                            style="font-size: 12px; color: #666; white-space: nowrap; display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                            <input type="checkbox" id="logoBitScoreCheckbox" checked style="cursor: pointer;">
+                            <span>Bit-score</span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Right: Filters box and Chain selector -->
+                <div style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
+                    <!-- .msa-filters so the narrow block can reach this row: two 100px
+                         sliders, two labels, two readouts and a count come to a
+                         min-content of 521px, which is wider than any phone. -->
+                    <div class="msa-filters"
+                        style="display: flex; align-items: center; gap: 10px; padding: 4px 10px; border: 1px solid #ccc; border-radius: 4px; background: #f9f9f9;">
+                        <span style="font-size: 12px; color: #666; font-weight: 500;">Filters:</span>
+                        <div style="display: flex; align-items: center; gap: 4px;">
+                            <label for="coverageSlider"
+                                style="font-size: 11px; color: #666; white-space: nowrap;">cov:</label>
+                            <input type="range" id="coverageSlider" min="0" max="100" value="75" step="5">
+                            <span id="coverageValue"
+                                style="font-size: 11px; color: #666; width: 40px; text-align: right; display: inline-block;">75%</span>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 4px;">
+                            <label for="identitySlider"
+                                style="font-size: 11px; color: #666; white-space: nowrap;">qid:</label>
+                            <input type="range" id="identitySlider" min="0" max="100" value="15" step="5">
+                            <span id="identityValue"
+                                style="font-size: 11px; color: #666; width: 40px; text-align: right; display: inline-block;">15%</span>
+                        </div>
+                        <span id="msaSequenceCount"
+                            style="font-size: 11px; color: #666; white-space: nowrap; min-width: 80px; text-align: center; margin-left: 4px; display: inline-block;">-</span>
+                    </div>
+                    <!-- Chain selector (hidden by default, shown when multiple chains available) -->
+                    <select id="msaChainSelect" class="btn btn-grey btn-small"
+                        style="display: none; min-width: 50px; height: 28px; font-size: 12px; padding: 0 8px;"></select>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Footer -->
+    <footer style="margin-top: var(--container-gap); padding: 0; color: #6b7280; font-size: 11px;">
+        <div class="page-width"
+            style="margin: 0 auto; padding: 8px 0 0 0; border-top: 1px solid #e5e7eb; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 4px 16px;">
+            <!-- WRAPS RATHER THAN ELLIPSISES. One unbroken line with the overflow
+                 hidden is a footer that reads "LocalFold · forks alphafold2-web…" on a
+                 phone and hides the link to the single-sequence page entirely; at
+                 948 it is one line either way. -->
+            <div id="footer-links" style="flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px;">
+                <a href="https://github.com/sokrypton/localfold" target="_blank" rel="noopener noreferrer" style="color: #3b82f6; text-decoration: none;"><i class="fab fa-github" style="margin-right: 5px;"></i>LocalFold</a>
+                <!-- 🔴 THE FORKS AND THE UPSTREAM PROJECTS ARE IN THE README,
+                     NOT HERE. Four links of provenance in a footer is a row a
+                     reader has to read past to find the one thing the footer
+                     is for - where the sequence goes - and they are
+                     attribution rather than navigation. README.md credits
+                     alphafold2-webgpu, py2Dmol, sokrypton/alphafold3 and the
+                     people named in its own "Running other models through this
+                     code", AlphaFold and ColabFold's MMseqs2 server, which is
+                     where a citation is looked for. -->
+                <!-- A button, not a link: it opens #credits below rather than
+                     going anywhere, and the README stays the place a citation
+                     is looked for. -->
+                <button type="button" id="credits-open" class="footer-credits">Credits</button>
+            </div>
+            <!-- 🔴 TRACKS THE ALIGNMENT MODE. It read "No data is uploaded to a
+                 server", which stopped being true when remote MSA search became
+                 the default. web/app.js rewrites it from syncMode(). -->
+            <!-- `flex: 0 0 auto` and one unbroken line is 300px of text that refuses
+                 to shrink, which is most of a phone. Wrapping cannot help an item
+                 wider than the line - it needs permission to shrink so the text
+                 wraps INSIDE it. -->
+            <div id="privacy-note" style="flex: 0 1 auto; min-width: 0;"></div>
+        </div>
+    </footer>
+
+    <!-- THE DEPLOYED PAGE LOADS THE BUNDLE. py2dmol.solab.org serves this
+         file from the repo root, so twenty-seven tags meant twenty-seven
+         requests and 2.9 MB; bundles/py2Dmol.web.min.js is 729 KB in one. To develop
+         against the loose sources - real line numbers, no rebuild between an
+         edit and a reload - open dev.html, which tools/bundle.py generates
+         from this file. -->
+
+    <!-- 🔴 THE MODEL PARAMETERS ARE NOT THIS PROJECT'S TO LICENCE, AND THIS IS
+         WHERE THAT IS SAID. AlphaFold 3's weights carry DeepMind's own terms
+         and a Prohibited Use Policy; LocalFold's code is not the thing under
+         them. tools/build_site.py already refuses to PUBLISH them without
+         LOCALFOLD_ACCEPT_MODEL_TERMS, which asks the deployer - this asks the
+         person actually about to fold, which is who the terms are addressed to.
+
+         🔴 AND IT IS A CHOICE, NOT AN INTERSTITIAL. A dialog whose only button
+         is "I agree" teaches people to click it. This one offers OpenBind, a
+         model that runs the same graph under Apache 2.0, so the acknowledgement
+         is a decision with an alternative rather than a toll gate.
+
+         The native <dialog> is deliberate: it gives focus trapping, Escape and
+         a backdrop that no hand-rolled overlay in this page gets right. -->
+    <dialog id="model-terms" class="terms-dialog" aria-labelledby="model-terms-title">
+      <form method="dialog" class="terms-form">
+        <h2 id="model-terms-title" class="terms-title">AlphaFold 3 model parameters</h2>
+        <!-- 🔴 "NOT OPEN SOURCE" WAS WRONG AND IS NOT WHAT THE TERMS SAY. The
+             AlphaFold 3 CODE is openly licensed; it is the PARAMETERS that are
+             restricted, and the restriction is on commercial use, not on
+             availability. Getting that backwards misstates somebody else's
+             licence in a dialog asking people to agree to it. -->
+        <p class="terms-body">
+          These are Google DeepMind's parameters. They are not available for
+          commercial use and carry a prohibited-use policy.
+        </p>
+        <!-- 🔴 EVERY MODEL THE PAGE OFFERS, NOT ONE. This named OpenBind-0 and
+             nothing else, so somebody who would rather fold with Boltz-2 or
+             EF2-fast had to dismiss the dialog, find the model row and set it
+             themselves - which is the state this page is otherwise careful
+             never to leave anybody in. OpenBind-0 is still what the chooser
+             starts on: it is the one that runs this same graph under Apache
+             2.0, so it is the nearest thing to the model being declined. -->
+        <p class="terms-body">
+          <strong>OpenBind-0</strong> runs the same architecture under Apache 2.0.
+          It is a different model, and so is every other choice below.
+        </p>
+        <p class="terms-links">
+          <a href="https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md"
+             target="_blank" rel="noopener noreferrer">AlphaFold 3 weights terms</a>
+          &middot;
+          <a href="https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_PROHIBITED_USE_POLICY.md"
+             target="_blank" rel="noopener noreferrer">prohibited use policy</a>
+          &middot;
+          <!-- 🔴 THE ANNOUNCEMENT, NOT THE REPOSITORY. Somebody reading this
+               dialog is deciding which model to fold with, and the release
+               post says what OpenBind is; the source tree says how to build
+               it. It also names the release we actually ported -
+               openfold-3/releases/tag/v0.5.0 - which is the distinction
+               shared/af3/dialect.js exists to keep straight. -->
+          <a href="https://openbind.uk/news/blog-openbind-0-advancing-open-molecular-structure-prediction/"
+             target="_blank" rel="noopener noreferrer">about OpenBind-0</a>
+        </p>
+        <!-- 🔴 EMPTY, AND FILLED FROM THE MODEL ROW WHEN THE DIALOG OPENS. A
+             second copy of the family list here is the allow-list that goes
+             stale - this file's own recurring bug - and it would re-offer a
+             model tools/build_site.py drops from dist/index.html when its
+             bundle is not servable. The row is the one list. -->
+        <div class="terms-choice">
+          <label class="terms-choice-label" for="model-terms-alternative">Fold with</label>
+          <select id="model-terms-alternative" class="terms-select"
+                  aria-label="Which model to fold with instead"></select>
+        </div>
+        <div class="terms-actions">
+          <!-- 🔴 THE VALUE IS "switch", NOT A FAMILY. A submit button's value
+               becomes the dialog's returnValue, and one that says "openbind0"
+               while the chooser says Boltz-2 is a lie the handler would have to
+               ignore. What was picked is read from the chooser. -->
+          <button type="submit" value="switch" class="terms-button terms-button-primary"
+                  id="model-terms-switch">Use this model instead</button>
+          <!-- 🔴 A FILLED BUTTON TOO, because an outline beside a filled one
+               reads as a cancel rather than as the other half of a choice -
+               and this dialog's whole point is that there are two real
+               options. Red for the restricted one: not "dangerous", but "this
+               one comes with conditions". -->
+          <button type="submit" value="accept" class="terms-button terms-button-caution"
+                  id="model-terms-accept">I accept &mdash; use AlphaFold 3</button>
+        </div>
+        <!-- 🔴 REMEMBERED, AND SAID TO BE. An acknowledgement that silently
+             never returns looks like it did not register the first time. -->
+        <p class="terms-note">Accepting is remembered on this browser.</p>
+      </form>
+    </dialog>
+
+    <!-- The people whose work runs on this page. Opened from the footer's
+         Credits button; README.md's "Acknowledgments and citation" is the long
+         form, with what to cite. -->
+    <dialog id="credits" class="terms-dialog credits-dialog" aria-labelledby="credits-title">
+      <form method="dialog" class="terms-form">
+        <h2 id="credits-title" class="terms-title">Credits</h2>
+        <p class="terms-body">
+          LocalFold began as a fork of
+          <a href="https://github.com/martin-steinegger/alphafold2-webgpu" target="_blank" rel="noopener noreferrer">AlphaFold2 WebGPU</a>
+          by Martin Steinegger. The viewer is
+          <a href="https://github.com/sokrypton/py2Dmol" target="_blank" rel="noopener noreferrer">py2Dmol</a>,
+          and the alignment search is the
+          <a href="https://github.com/sokrypton/ColabFold" target="_blank" rel="noopener noreferrer">ColabFold</a>
+          MMseqs2 server (Milot Mirdita, Martin Steinegger).
+        </p>
+        <p class="terms-body">
+          The models beyond AlphaFold 2 are ported from and checked against
+          <a href="https://github.com/sokrypton/alphafold3" target="_blank" rel="noopener noreferrer">sokrypton/alphafold3</a>,
+          with work by Marielle Russo (@maraxen), ChoongHwanLee (@chlee19990109-cloud),
+          juliabuhmann (@juliabuhmann) and Milot Mirdita (@milot-mirdita).
+        </p>
+        <h3 class="credits-heading">Methods borrowed</h3>
+        <ul class="credits-list">
+          <li><a href="https://arxiv.org/abs/2610.23703" target="_blank" rel="noopener noreferrer"><strong>Blitz</strong></a>
+            (Vinay Saji Mathew, Soundar Kumara, Gretta Kellogg, William K. M. Lai):
+            the diffusion sampler's exponential update and geometric noise
+            schedule, used by every AlphaFold 3-family model here.</li>
+          <li><strong>Synthyra</strong>: the ESMFold2 confidence head (pLDDT, PAE,
+            pTM), trained on ESMFold2's frozen trunk -
+            <a href="https://github.com/Synthyra/FastPLMs" target="_blank" rel="noopener noreferrer">FastPLMs</a>,
+            <a href="https://huggingface.co/Synthyra/ESMFold2-600" target="_blank" rel="noopener noreferrer">ESMFold2-600</a>.</li>
+          <li><a href="https://github.com/KosinskiLab/af3x" target="_blank" rel="noopener noreferrer"><strong>af3x</strong></a>
+            (Konstantin Gilep, Agnieszka Obarska-Kosinska, Jan Kosinski): crosslinks modelled
+            explicitly, the crosslinker as a ligand bonded to the two residues it
+            joined, and its crosslinker definitions -
+            <a href="https://www.biorxiv.org/content/10.1101/2024.12.03.626671v4" target="_blank" rel="noopener noreferrer">preprint</a>.</li>
+        </ul>
+        <h3 class="credits-heading">Models</h3>
+        <ul class="credits-list">
+          <li>AlphaFold 2 and AlphaFold 3 - Google DeepMind</li>
+          <li>OpenBind-0 (OpenFold3 v0.5.0) - OpenBind</li>
+          <li>OpenDDE - Aureka Research</li>
+          <li>Boltz-2 - the Boltz team</li>
+          <li>Protenix-2 - ByteDance</li>
+          <li>Mol-1 - Molence Bio</li>
+          <li>IntelliFold-2 - IntelliGen AI</li>
+          <li>RoseTTAFold3 - Baker lab / RosettaCommons</li>
+          <li>ESMFold2 and ESM-C - Biohub</li>
+          <li>BioEmu2 - Microsoft Research</li>
+        </ul>
+        <div class="terms-actions">
+          <button type="submit" value="close" class="terms-button">Close</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- TM-align and the viewer's side of it, in one file, and the one thing
+         that can never be concatenated: it starts its Worker by having the
+         worker importScripts *itself*, found through document.currentScript.src,
+         which inlining leaves empty. Its TM-align half is generated from
+         foldjs/lib/tmalign.js - see tests/vendor_tmalign.mjs. -->
+    <script src="./web/vendor/py2Dmol.align.js"></script>
+    <script src="./web/vendor/py2Dmol.full.min.js"></script>
+    <script type="module" src="./web/app.js"></script>
+    <!-- 🔴 AND IF THAT MODULE NEVER RUNS, SAY SO. A module that throws while
+         loading - a bad import, a 404 on one file of the graph - fails quietly:
+         the page renders, the controls are all there, and nothing works. With
+         the button now shipping disabled, that failure would present as a Fold
+         button that is simply dead forever, which is not much better than one
+         that is silently inert. This turns it into a sentence. It is a classic
+         script on purpose: it has to survive whatever stopped the module. -->
+    <script>
+      setTimeout(function () {
+        var button = document.getElementById("predict");
+        if (button === null || !button.disabled) return;
+        var node = document.getElementById("status-message");
+        if (node !== null) {
+          node.textContent = "This page did not finish loading, so folding is"
+            + " disabled. A reload usually fixes it; if it does not, the"
+            + " browser console will say which file failed.";
+          node.classList.add("error");
+        }
+      }, 15000);
+    </script>
+
+
+</body>
+
+</html>

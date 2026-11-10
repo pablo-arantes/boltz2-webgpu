@@ -1,0 +1,170 @@
+/**
+ * One AF2 trunk pass, COLD AND WARM, at the shape another port is measured on.
+ *
+ *     node tools/gpu-chrome.mjs tools/gpu/bench-af2-warm.js --length=59 --rows=128 --extra=256
+ *
+ * 🔴 THIS EXISTS BECAUSE THE COMPARISON IN docs/AF2.md WAS NOT LIKE FOR LIKE,
+ * AND THE DIRECTION OF THE ERROR HID IT. `fold-af2.js` reports ONE pass with
+ * every fixed cost in it - featurisation, pipeline compilation, the first
+ * touch of every buffer - and martin-steinegger/alphafold2-webgpu's harness
+ * reports the MINIMUM OF TWO WARM PASSES after a cold one. Their own numbers
+ * show what that is worth: 16.39 cold against 14.21 warm at 825 residues, and
+ * 3.82 against 1.26 at 59. So every "LocalFold vs the other port" figure in
+ * this repository has been a cold number against a warm one, which flattered
+ * THEM - and at short lengths, where a fold is mostly fixed cost, by more than
+ * the whole difference between the two ports.
+ *
+ * This runs three passes and reports both, in their format, so the two can be
+ * read off against each other at either temperature. Everything else is
+ * `fold-af2.js`: the same synthetic alignment, which is character-for-character
+ * the one their harness builds.
+ *
+ * 🔴 `--passes` MEANS SOMETHING ELSE IN THEIR HARNESS, AND THE MISTAKE IS A
+ * SILENT 3x AGAINST THEM. Here it is the number of TIMED REPETITIONS: three,
+ * one cold and two warm. In `bench/bench825.js` the repetition count is
+ * hardcoded at three and `--passes` is read as `recycles: passes - 1` - the
+ * number of TRUNK PASSES INSIDE ONE PREDICTION. So `--passes=3` on both sides
+ * times the same three repetitions here and three RECYCLES there, and their
+ * 59-residue figure goes 1.24 s to 3.65 while ours does not move. Run theirs
+ * with no `--passes` at all, which is 0 recycles and the three repetitions its
+ * loop always does; that is what this tool's default matches.
+ */
+import { setBufferPooling } from "../../webgpu/runtime/allocator.js";
+import { AlphaFoldMonomerGpu } from "../../webgpu/af2/model/monomer.js";
+import { makeA3mFeatures } from "../../shared/input/a3m-features.js";
+import { AlphaFoldFixture } from "../../shared/bundles/alphafold-fixture.js";
+import { HttpTensorStore } from "../../shared/bundles/http-tensor-store.js";
+import { DEFAULT_TUNING, setDeviceTuning } from "../../webgpu/runtime/device-profile.js";
+
+const option = (args, name, fallback) => {
+  const prefix = `--${name}=`;
+  return args.find((a) => a.startsWith(prefix))?.slice(prefix.length) ?? fallback;
+};
+
+const QUERY = "PIAQIHILEGRSDEQKETLIREVSEAISRSLDAPLTSVRVIITEMAKGHFGIGGELASK";
+
+export async function main(device, args) {
+  // 🔴 `--no-pool` ANSWERS "IS IT THE BUFFER POOL?" IN ONE RUN. A recycled
+  // buffer carries the previous fold's bytes, so a kernel reading a region it
+  // did not write differs between a fresh buffer and a reused one - which looks
+  // like a race and is not. Off, every allocation is fresh and zero-filled: a
+  // difference that survives is a real race, one that vanishes is an
+  // uninitialised read. See setBufferPooling.
+  setBufferPooling(!args.includes("--no-pool"));
+  const length = Number(option(args, "length", "825"));
+  const rows = Number(option(args, "rows", "512"));
+  const extraRows = Number(option(args, "extra", "1024"));
+  const passes = Number(option(args, "passes", "3"));
+  const tune = option(args, "tune", "");
+  for (const pair of tune.split(",").filter(Boolean)) {
+    const at = pair.indexOf("=");
+    if (at < 0) throw new Error(`--tune wants key=value, got ${pair}`);
+    const key = pair.slice(0, at);
+    if (!(key in DEFAULT_TUNING)) throw new Error(`--tune names ${key}, not a tuning knob`);
+    const raw = pair.slice(at + 1);
+    let value;
+    try { value = JSON.parse(raw); } catch { value = raw; }
+    setDeviceTuning(device, { [key]: value });
+  }
+
+  const sequence = QUERY.repeat(Math.ceil(length / QUERY.length)).slice(0, length);
+  const { MODEL_BUNDLES, loadManifest } = await import("../../shared/bundles/manifests/index.js");
+  const store = await HttpTensorStore.fromManifest(
+    MODEL_BUNDLES.monomer.directory, await loadManifest("monomer"));
+  const fixture = AlphaFoldFixture.fromStore(store);
+  const [embedding, template, extraStack, mainStack, structure, confidence,
+         geometry, featureTables, paeBreaks] = await Promise.all([
+    fixture.embeddingWeights(), fixture.templateWeights(), fixture.extraStackWeights(),
+    fixture.mainStackWeights(), fixture.structureWeights(), fixture.confidenceWeights(),
+    fixture.geometryTables(), fixture.queryOnlyFeatureTables(),
+    fixture.tensor("confidencePaeBreaks"),
+  ]);
+  const weights = {
+    embedding, template, extraStack, mainStack, structure,
+    lddt: confidence.lddt, pae: confidence.pae, geometry,
+  };
+
+  // Their alignment, verbatim - the gap pattern below is the one their bench
+  // writes, so the two ports see the same rows and not merely the same count.
+  const lines = [">query", sequence];
+  for (let row = 1; row < rows + extraRows; row += 1) {
+    lines.push(`>synthetic${row}`);
+    lines.push([...sequence].map((code, column) =>
+      (((row >> (column % 24)) & 1) === 1 ? "-" : code)).join(""));
+  }
+  // 🔴 `--rows` WAS INERT HERE, AND IT MISLED TWO AGENTS. The stride used to be
+  // `row % 11 + 3`, so rows 1, 12, 23 were identical and this alignment carried
+  // **12** distinct sequences whatever `--rows` said - which the featuriser's
+  // deduplication then collapsed it to. Twelve is below `cOuter`, so
+  // `useOuterFirstContraction` was always false and the outer product mean's
+  // residual always fired: measured with tools/gpu/probe-add-in-place.js, this
+  // gate issued **53** addInPlace dispatches at BOTH --rows=128 and --rows=16.
+  //
+  // That mattered while `addInPlace` had no bounds check under a folded grid:
+  // the gate was exercising 53 corrupted adds a pass and reporting the depth as
+  // whatever was asked for. With distinct rows `--rows` selects the shape -
+  // below 32 the residual fires 48 times a recycle, at or above it once - so
+  // both can be tested on purpose. fold-af2.js took the same fix earlier.
+  const distinct = new Set(lines.filter((_, index) => index % 2 === 1)).size;
+  if (distinct !== rows + extraRows) {
+    throw new Error(`the synthetic alignment has ${distinct} distinct rows of `
+      + `${rows + extraRows}: a ${sequence.length}-residue sequence cannot express `
+      + "enough gap patterns");
+  }
+  const a3m = `${lines.join("\n")}\n`;
+
+  // 🔴 THE FEATURES ARE BUILT ONCE, OUTSIDE THE CLOCK, BECAUSE THEIRS ARE.
+  // `predictA3m` deliberately times the alignment prep - see the note on it,
+  // and docs/AF2.md has had to rewrite that prep once already - but their
+  // harness calls `makeA3mFeatures` before the loop and times `predict` alone.
+  // Leaving ours inside would put 0.56 s of main-thread JavaScript at 825
+  // residues on one side of the comparison and not the other. It is reported
+  // separately instead, so neither number goes missing.
+  const featureStart = performance.now();
+  const features = makeA3mFeatures(a3m, featureTables,
+    { recycles: 0, randomSeed: 0, maxMsaSequences: rows, maxExtraSequences: extraRows });
+  const featureMs = performance.now() - featureStart;
+
+  const runner = new AlphaFoldMonomerGpu(device);
+  const times = [];
+  // 🔴 A CHECKSUM PER PASS, AND THEY HAVE TO AGREE. This tool ran three
+  // predictions and reported the LAST one's atoms, which threw away the one
+  // comparison it was already paying for: three runs of the same graph over the
+  // same inputs in one process, where the pipelines and the buffers are
+  // identical and only the SCHEDULING differs. That is a race detector, and it
+  // caught one - see docs/A100.md on the matrix flash attention's staging.
+  //
+  // Cross-process is not the same test and is much weaker: two invocations
+  // differ in warm-up, allocation order and clocks as well, so a difference
+  // there is ambiguous and a match there is luck.
+  const checksums = [];
+  const checksumOf = (atoms) => {
+    let sum = 0;
+    for (let i = 0; i < atoms.length; i += 1) sum = (sum + Math.round(atoms[i] * 1000)) | 0;
+    return sum;
+  };
+  let prediction;
+  for (let pass = 0; pass < passes; pass += 1) {
+    const started = performance.now();
+    prediction = await runner.predict(features, weights, paeBreaks);
+    times.push(performance.now() - started);
+    checksums.push(checksumOf(prediction.final.structure.atom37));
+  }
+  const round = (v) => Number((v / 1000).toFixed(3));
+  const checksum = checksums[checksums.length - 1];
+  const deterministic = checksums.every((value) => value === checksums[0]);
+  if (!deterministic && !args.includes("--allow-nondeterminism")) {
+    throw new Error(`${passes} passes of the same graph over the same inputs returned `
+      + `${new Set(checksums).size} different structures: ${checksums.join(", ")}. `
+      + "That is a race, not a precision difference - see docs/A100.md.");
+  }
+  return {
+    length, clustered: rows, extra: extraRows, passes,
+    featureSeconds: round(featureMs),
+    coldSeconds: round(times[0]),
+    warmSeconds: round(Math.min(...times.slice(1))),
+    allSeconds: times.map(round),
+    meanPlddt: Number(prediction.final.confidence.meanPlddt.toFixed(2)),
+    checksum, checksums, deterministic,
+  };
+}

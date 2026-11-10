@@ -1,0 +1,969 @@
+/**
+ * OUR WHOLE FEATURISED BATCH against af3-any-model's own, field by field, for
+ * every dumped model.
+ *
+ *     node tools/check-batch-fields.js [--model=rosettafold3] [--verbose]
+ *
+ * 🔴 THE GENERALISATION OF check-atom-windows.js, AND THE REASON IS THAT ITS
+ * TWO SPOT CHECKS KEPT FINDING THINGS. That tool compares `queries_to_keys` and
+ * rf3's chiral centres and nothing else; between them they found the atom key
+ * window wrong in four of seven models and a chirality term twice recorded as a
+ * no-op. The dump carries SIXTY fields. Comparing two of them and reasoning
+ * about the other fifty-eight is how both of those survived, so this compares
+ * all of them it can name.
+ *
+ * 🔴 A FIELD THIS PORT DOES NOT BUILD IS REPORTED, NOT SKIPPED SILENTLY. The
+ * whole failure mode here is a convention nobody looked for, so an unmapped
+ * field prints as `unmapped` and is counted - `--verbose` lists them. Several
+ * are genuinely absent by design (the reference emits ligand bond gathers on a
+ * batch with no ligands); the point is that the list is visible rather than
+ * implied.
+ *
+ * 🔴 AND IT COMPARES INTEGERS WHERE IT CAN. `ref_pos` is the one field with a
+ * known, deliberate floor - this port ships ONE idealised conformer set shared
+ * across models where the reference featurises CCD geometry, which is the
+ * user's own decision ("ideal conformer shared across all models is worth it")
+ * - so it is compared at a loose bound and labelled, never silently passed.
+ *
+ * 🔴 AND EVERY PER-ATOM FIELD IS COMPARED ONLY WHERE `ref_mask` IS LIVE, WHICH
+ * IS THE THIRD TIME THIS PORT HAS LEARNED THAT RULE. The first version of this
+ * tool reported `ref_element` differing in one slot of 1632 across the four
+ * families that drop the terminal atom, and it looked like a real defect in
+ * four shipped models: the reference drops OXT by MASKING it while leaving its
+ * element (8), its name ("OXT") and its conformer position in place, where this
+ * port never creates the atom and leaves the dense slot zeroed. Both sides then
+ * compute a per-atom conditioning row for it - `rows = tokens * dense` - and
+ * neither ever reads it: no gather on EITHER side references dense slot 1617
+ * with a live mask, checked for all four. So it is a padded slot the reference
+ * fills and this port zeroes, which is precisely what docs/OPENDDE.md's note
+ * about `mask_mean` describes and what an earlier encoder checker was already
+ * corrected for. Compare where the data is real, or spend a night on a slot
+ * that computes nothing.
+ *
+ * 🔴 AND IT HAS BEEN WATCHED FAILING, WHICH IS THE ONLY THING THAT MAKES IT A
+ * GATE. `--falsify=<flag>` inverts one dialect convention before featurising:
+ *
+ *     SHIPPED                  exit 0
+ *     paddedAtomKeys           exit 1   28 red lines
+ *     qblockAtomKeys           exit 1   12
+ *     dropTerminalAtoms        exit 1   70
+ *     centreRefConformers      exit 1    8
+ *     symmetriseBonds          exit 1    7
+ *     atomizedElementNames     exit 1    7
+ *     atomizedUnknownRestype   exit 1    8
+ *     atomizedUnknownMsa       exit 1    2
+ *     atomizedBackboneBonds    exit 1    7
+ *     dedupeSelfMsa            exit 0   🔴 NOT OBSERVABLE HERE
+ *
+ * The last row is the honest limitation. `dedupeSelfMsa` decides whether the
+ * QUERY appears twice in the alignment, and the alignment is the one input this
+ * port takes from its caller rather than from the reference - so `msa` is not
+ * compared and the convention cannot be seen from here. It has evidence
+ * elsewhere (AF3 6MRR 83.084 -> 83.169); it does not have it in this gate.
+ *
+ * 🔴 AND IT GOES THROUGH `af3BatchFromA3m`, NOT STRAIGHT INTO THE
+ * FEATURISER. shared/af3/featurise/batch.js forwards the dialect to `featuriseProtein` field
+ * by field, and the first version of this tool skipped that step - so a
+ * convention dropped from THAT list would have left this gate green while the
+ * page and every fold tool silently featurised with another model's
+ * conventions, which is CLAUDE.md's stale-allow-list trap for a third time.
+ * Verified: deleting `atomizedBackboneBonds` from batch.js's forwarding turns
+ * this red with "4 bonds the reference has and this port does not".
+ *
+ * 🔴 AND `centreRefConformers` NEEDED ITS OWN ARM BECAUSE IT IS A
+ * TRANSLATION. It is invisible to intra-token distances (invariant) and buried
+ * inside ref_pos's floor bucket elementwise, so it was the one convention that
+ * stayed green under falsification until the centroid comparison was added. A
+ * convention nothing can see is a convention nobody is checking.
+ */
+import { readFileSync } from "node:fs";
+import { af3BatchFromA3m } from "../shared/af3/featurise/batch.js";
+import { mergeRowAlignedChainA3ms } from "../shared/input/chains.js";
+import { parseCcdComponent, ligandChain } from "../shared/af3/featurise/ccd-component.js";
+import { dialectFor, DIALECTS, featuriserDialect } from "../shared/af3/dialect.js";
+import { structuralBatch, structuralLayout } from "../shared/af3/featurise/structural-tokens.js";
+
+const MODELS = ["alphafold3", "openbind0", "opendde", "boltz2", "protenix2", "chai1",
+                "intellifold2", "rosettafold3"];
+
+// 🔴 TWO TARGETS, BECAUSE ONE OF THEM CANNOT REACH FOUR CONVENTIONS. 6MRR is a
+// plain 68-residue protein: it has no ligand and no modified residue, so
+// `symmetriseBonds`, `atomized_element_names`, `atomized_backbone_bonds` and
+// `atomized_unknown_restype` are all inert on it, and a gate built only on that
+// target reports them green by never reaching them. `gol-sep3` is the same
+// sequence with GLYCEROL as a second chain and a PHOSPHOSERINE at position 3 -
+// 83 tokens rather than 68, the ligand at 77-82 - dumped by
+// tools/oracle/dump_af3_batch.py --ligand GOL --ptm SEP@3.
+const fixture = (path) => readFileSync(new URL(`fixtures/${path}`, import.meta.url), "utf8");
+const ccd = (code) => parseCcdComponent(readFileSync(
+  new URL(`fixtures/ccd/${code}.cif`, import.meta.url), "utf8"));
+const TARGETS = {
+  "6mrr": { suffix: "", extra: () => ({}) },
+  "gol-sep3": {
+    suffix: "-gol-sep3",
+    extra: () => ({
+      modifications: [{ chain: 0, position: 3, ...ccd("SEP") }],
+      ligands: [ccd("GOL")],
+    }),
+  },
+  // a modified BASE: 20 nucleotides of DNA with 5-methylcytosine at 5 and 9 - each atomised into 20
+  // tokens with the PARENT's restype (DC, not the cysteine the amino-acid table reads), its OP3 gone
+  // mid-chain. Dumped by dump_af3_batch.py --kind dna --mods 5CM@5,5CM@9 --user-ccd 5CM.cif
+  // (af3-any-model's pip install carries a CCD without any modified base).
+  // the unknown nucleotide (N; DN in a DNA chain) mid-chain and at the 5' end: AF3's restype 30 and its backbone, no base
+  // (--kind dna|rna --sequence NACGNTACGTN / NACGNUACGUN: past 128 atoms, where the atom key windows are compared), where
+  // this port once made it the protein unknown, N CA C O
+  "dna-unk": { suffix: "-dna-unk", extra: () => ({ chainKinds: ["dna"] }) },
+  "rna-unk": { suffix: "-rna-unk", extra: () => ({ chainKinds: ["rna"] }) },
+  "dna-5cm": {
+    suffix: "-dna-5cm",
+    extra: () => ({
+      chainKinds: ["dna"],
+      modifications: [{ chain: 0, position: 5, ...ccd("5CM") }, { chain: 0, position: 9, ...ccd("5CM") }],
+    }),
+  },
+  // and RNA's: AlphaFold 3's modified_rna example - 2'-O-methylguanosine, pseudouridine (a C-glycoside,
+  // its base joined by a carbon) and 5-methylcytidine (--kind rna --mods OMG@4,PSU@13,5MC@18)
+  // a GLYCAN: AlphaFold 3's rnaseb_glycosylated example - five components as one ligand chain,
+  // joined to each other and to Asn34 by bondedAtomPairs (--ligand NAG,NAG,BMA,MAN,MAN --bonds ...)
+  "glycan": {
+    suffix: "-glycan",
+    extra: () => {
+      const end = (asym, residue, atom) => ({ asym, residue, atom });
+      return {
+        ligands: [ligandChain(["NAG", "NAG", "BMA", "MAN", "MAN"].map(ccd))],
+        bonds: [[end(0, 34, "ND2"), end(1, 1, "C1")], [end(1, 1, "O4"), end(1, 2, "C1")],
+                [end(1, 2, "O4"), end(1, 3, "C1")], [end(1, 3, "O3"), end(1, 4, "C1")],
+                [end(1, 3, "O6"), end(1, 5, "C1")]].map(([from, to]) => ({ from, to })),
+      };
+    },
+  },
+  // NUCLEIC ALIGNMENTS: an RNA chain with its own unpaired A3M, alone and beside a protein with
+  // its own - AF3 stacks the chains' unpaired rows side by side, an RNA column in RNA's codes
+  // (A 22 ... U 25), which is what a job's inline unpairedMsa gives (--chains rna:SEQ:A3M,...)
+  "rna-msa": {
+    suffix: "-rna-msa",
+    alignment: () => ({ unpaired: fixture("msa/rna-17.a3m"), paired: null }),
+    extra: () => ({ chainKinds: ["rna"], msaColumnKinds: Array(17).fill("rna") }),
+  },
+  "prot-rna-msa": {
+    suffix: "-prot-rna-msa",
+    alignment: () => ({ unpaired: mergeRowAlignedChainA3ms([fixture("msa/protein-21.a3m"), fixture("msa/rna-17.a3m")],
+                                                                 { anyLetter: true }),
+                        paired: null }),
+    extra: () => ({ chainKinds: ["protein", "rna"],
+                    msaColumnKinds: [...Array(21).fill("protein"), ...Array(17).fill("rna")] }),
+  },
+  // a modified PROLINE (3-hydroxyproline at 4): boltz2's one-token residue tore it apart where SEP
+  // folded clean (--sequence P..P.. --mods HY3@4)
+  "hy3": {
+    suffix: "-hy3",
+    extra: () => ({ modifications: [{ chain: 0, position: 4, ...ccd("HY3") }] }),
+  },
+  // ...and a modified base at a chain's FIRST residue, which keeps the 5' OP3 a mid-chain one drops
+  // (AF3's kitchen-sink example puts 6OG and 2MG there): --mods 6OG@1,6MA@2 on GATTACA, 2MG@1,5MC@4
+  // on GUACGUAC (its GUAC is under the 128-atom key window, where the reference itself crashes)
+  "dna-5prime": {
+    suffix: "-dna-5prime",
+    extra: () => ({ chainKinds: ["dna"],
+                    modifications: [{ chain: 0, position: 1, ...ccd("6OG") }, { chain: 0, position: 2, ...ccd("6MA") }] }),
+  },
+  "rna-5prime": {
+    suffix: "-rna-5prime",
+    extra: () => ({ chainKinds: ["rna"],
+                    modifications: [{ chain: 0, position: 1, ...ccd("2MG") }, { chain: 0, position: 4, ...ccd("5MC") }] }),
+  },
+  // AlphaFold 3's KITCHEN-SINK example (tools/fixtures/af3-jobs/alphafold_input.json) as the page
+  // and the native exporter read it - jobFromJson, expandEntities, mergeJobAlignments, the SMILES
+  // built here - against AF3's own featurisation of the same file (dump_af3_batch.py --job, the
+  // twelve components it lacks as --user-ccd): two proteins with PTMs, two DNA and an RNA chain with
+  // modified bases, inline alignments over protein and RNA, ten ligand chains (a two-component
+  // glycan, a SMILES), and its bonds
+  "kitchen-sink": {
+    suffix: "-kitchen-sink",
+    alignment: () => KITCHEN.alignment,
+    extra: () => KITCHEN.options,
+    smilesCodes: () => KITCHEN.smilesCodes,
+  },
+  "rna-mods": {
+    suffix: "-rna-mods",
+    extra: () => ({
+      chainKinds: ["rna"],
+      modifications: [{ chain: 0, position: 4, ...ccd("OMG") }, { chain: 0, position: 13, ...ccd("PSU") },
+                      { chain: 0, position: 18, ...ccd("5MC") }],
+    }),
+  },
+};
+
+// theirs -> how to get ours. A gather is three fields and is handled below.
+const FIELDS = {
+  aatype: (b) => b.aatype,
+  asym_id: (b) => b.asymId,
+  entity_id: (b) => b.entityId,
+  sym_id: (b) => b.symId,
+  residue_index: (b) => b.residueIndex,
+  token_index: (b) => b.tokenIndex,
+  seq_mask: (b) => b.seqMask,
+  // boltz2's target_feat sums a mol-type and a modified conditioning off these
+  is_dna: (b) => b.isDna,
+  is_rna: (b) => b.isRna,
+  is_ligand: (b) => b.isLigand,
+  is_modified: (b) => b.isModified,
+  deletion_mean: (b) => b.deletionMean,
+  profile: (b) => b.profile,
+  ref_mask: (b) => b.refMask,
+  ref_element: (b) => b.refElement,
+  ref_charge: (b) => b.refCharge,
+  ref_atom_name_chars: (b) => b.refAtomNameChars,
+  ref_space_uid: (b) => b.refSpaceUid,
+  ref_pos: (b) => b.refPos,
+  // boltz2's self-bond on a one-token modified residue: its bond type + 1 on the diagonal, 0 elsewhere
+  self_bond_type: (b) => Array.from({ length: b.tokens }, (_, t) => (b.bondMatrix?.[t * b.tokens + t]
+    ? (b.bondOrderMatrix[t * b.tokens + t] | 0) + 1 : 0)),
+  // chai1's per-row database (applyChaiMsa): 2 UNIREF90, 0 BFD_UNICLUST, by the a3m header
+  msa_source: (b) => b.msaSource ?? Int32Array.from({ length: b.sequences }, (_, row) => (row === 0 ? 4 : 2)),
+  pred_dense_atom_mask: (b) => b.predDenseAtomMask,
+  // chai1's declared-bond feature (absent on our side with no bond declared: all zeros) - compared as a DIRECTED
+  // edge set below, the reference's matrix being padded to its token bucket
+  declared_bonds: (b) => b.declaredBondMatrix ?? new Float32Array(b.tokens * b.tokens),
+};
+const GATHERS = {
+  "queries_to_keys": (b) => b.queriesToKeys,
+  "queries_to_token_atoms": (b) => b.queriesToTokenAtoms,
+  "tokens_to_queries": (b) => b.tokensToQueries,
+  "tokens_to_keys": (b) => b.tokensToKeys,
+  "token_atoms_to_queries": (b) => b.tokenAtomsToQueries,
+  "token_atoms_to_pseudo_beta": (b) => b.tokenAtomsToPseudoBeta,
+};
+// Fields this port has no equivalent for, each with the reason. Listed rather
+// than omitted, so "we do not build it" stays a claim someone can check.
+const ABSENT = {
+  msa: "the dump's MSA is the reference's own search; ours is the caller's",
+  msa_mask: "as msa",
+  deletion_matrix: "as msa",
+  is_protein: "derived from aatype at use, not stored",
+  is_water: "as is_protein", is_nonstandard_polymer_chain: "as is_protein",
+  frames_mask: "the frame set is built in the confidence head, not the batch",
+  // chai1's: ESM2 3B's output, which this port computes in the fold (cuda/plm/esm2.cuh, 3.3e-4 against the
+  // reference's tower) from the ids shared/af3/featurise/esm2-input.js writes - an input to the model, not a feature
+  esm_embeddings: "computed by the fold's own ESM2 tower, not the featuriser",
+  residue_center_index: "derived from the dense layout at use",
+  chiral_angles: "gated in check-atom-windows.js",
+  chiral_centers: "gated in check-atom-windows.js",
+  ligand_ligand_bond_order: "compared beside the bond gathers, as an ORDER per pair",
+  // protenix2's: native's own RNG replayed for one seed (MC dropout, each pass's MSA rows) - a draw, not a feature
+  px_drop_offset: "protenix's RNG replay (af3-any-model _native_rng): sampling, not featurisation",
+  px_msa_rows: "as px_drop_offset",
+  msa_paired: "compared on its own, below: row 0 against msaPairedQueryRow",
+  template_aatype: "the template slot is built by buildTemplate, not featurise",
+  template_atom_mask: "as template_aatype",
+  template_atom_positions: "as template_aatype",
+};
+// A bound per field. Integers are exact; ref_pos carries the shared-conformer
+// floor this repository has chosen deliberately and documents everywhere.
+const BOUNDS = { ref_pos: 2.5, ref_charge: 1e-6, profile: 1e-6,
+                 deletion_mean: 1e-6, default: 0 };
+// Per-atom fields live on the dense `tokens * dense` grid, where a slot is real
+// only if `ref_mask` says so. See the note above on why this is not optional.
+const PER_ATOM = new Set(["ref_element", "ref_charge", "ref_atom_name_chars",
+                          "ref_space_uid", "ref_pos", "ref_mask",
+                          "pred_dense_atom_mask"]);
+const WIDTH = { ref_pos: 3, ref_atom_name_chars: 4 };
+// The reference's bond gathers. On a ligand-free target they are entirely dead
+// and this says so; on `gol-sep3` they carry real bonds and are compared
+// against this port's bond matrix as an undirected edge set - see below.
+const BOND_GATHERS = ["token_atoms_to_polymer_ligand_bonds",
+                      "tokens_to_ligand_ligand_bonds",
+                      "tokens_to_polymer_ligand_bonds"];
+
+const flat = (v) => (Array.isArray(v?.data) ? v.data : []);
+const args = process.argv.slice(2);
+const only = (args.find((a) => a.startsWith("--model=")) ?? "").slice(8);
+const verbose = args.includes("--verbose");
+// --show=<field>: the first differing elements of one field, as index:ours/theirs
+const show = (args.find((a) => a.startsWith("--show=")) ?? "").slice(7);
+// 🔴 AND IT MUST BE ABLE TO FAIL. `--falsify=<flag>` inverts one dialect flag
+// before featurising, and every one of them must turn some model red - a gate
+// nobody has watched fail is a gate that may be comparing nothing. See the
+// bottom of this file for the run that proves it.
+const falsify = (args.find((a) => a.startsWith("--falsify=")) ?? "").slice(10);
+// a job file's inputs as the page and the native exporter read it (a SMILES conformer is async)
+async function jobInputs(file) {
+  const { jobFromJson } = await import("../web/job-json.js");
+  const { expandEntities } = await import("../web/entities.js");
+  const { mergeJobAlignments } = await import("../shared/input/chains.js");
+  const { smilesComponent } = await import("../shared/chem/component.js");
+  const job = jobFromJson(fixture(file));
+  const request = expandEntities(job.entities);
+  const merged = job.alignments === undefined ? null
+    : mergeJobAlignments(job.alignments, request.chains, request.chainKinds);
+  const ligands = [];
+  const smilesCodes = request.ligandCodes.filter((entry) => entry?.smiles !== undefined)
+    .map((entry) => entry.code ?? "LIG");
+  for (const entry of request.ligandCodes) {
+    ligands.push(typeof entry === "string" ? ccd(entry)
+      : entry.codes ? ligandChain(entry.codes.map(ccd))
+      : await smilesComponent(entry.smiles, { code: entry.code ?? "LIG" }));
+  }
+  return {
+    smilesCodes,
+    alignment: merged?.alignment ?? null,
+    options: {
+      chainKinds: request.chainKinds, ligands,
+      ...(merged === null ? {} : { msaColumnKinds: merged.msaColumnKinds }),
+      modifications: request.modifications.map((m) => ({ chain: m.chain, position: m.position, ...ccd(m.code) })),
+      ...(request.bonds === undefined ? {} : { bonds: request.bonds }),
+    },
+  };
+}
+const KITCHEN = await jobInputs("af3-jobs/alphafold_input.json");
+// a STANDALONE glycan beside a bonded one (tools/fixtures/glycan-standalone.json): AF3's rule drops an unbonded sugar's
+// O1, OpenFold3's and the families that keep a ligand whole do not (glycanO1Leaving)
+const GLYCAN = await jobInputs("glycan-standalone.json");
+TARGETS["glycan-standalone"] = { suffix: "-glycan-standalone", alignment: () => GLYCAN.alignment,
+                                 extra: () => GLYCAN.options, smilesCodes: () => GLYCAN.smilesCodes };
+// ...and every other AlphaFold 3 example job, each against AF3's own featurisation of the file
+// (dump_af3_batch.py --job ... --out oracle-dumps/af3-batch-alphafold3-6mrr-job-<name>.json):
+// their chain ids already sort in this port's order, so no relabelling
+const JOB_NAMES = ["barnase_barstar", "calmodulin_4calcium", "erk2_phosphorylated", "kras_g12c_sotorasib",
+  "methylated_dna", "modified_rna", "rnaseb_glycosylated", "streptavidin_biotin_smiles", "tetr_dimer_dna",
+  "tetr_dimer_tetracycline", "tetr_homodimer", "u1a_rna_hairpin", "ubiquitin_monomer"];
+for (const name of JOB_NAMES) {
+  const inputs = await jobInputs(`af3-jobs/${name}.json`);
+  TARGETS[`job:${name}`] = { suffix: `-job-${name}`, alignment: () => inputs.alignment,
+                             extra: () => inputs.options, smilesCodes: () => inputs.smilesCodes };
+}
+const onlyTarget = (args.find((a) => a.startsWith("--target=")) ?? "").slice(9);
+// --dumps=<dir under the repo>: another set of reference batches (oracle-dumps-colab/: sokrypton/alphafold3 colab's)
+const dumpsDir = (args.find((a) => a.startsWith("--dumps=")) ?? "--dumps=oracle-dumps").slice(8);
+
+/** The dump for one (model, target), or null when it has not been generated. */
+function dumpFor(model, target) {
+  const file = `af3-batch-${model}-6mrr${TARGETS[target].suffix}.json`;
+  try {
+    return narrowDense(JSON.parse(readFileSync(new URL(`../${dumpsDir}/${file}`, import.meta.url))), 24);
+  } catch (error) { if (error instanceof SyntaxError || error.code === "ENOENT") return null; throw error; }
+}
+
+/**
+ * 🔴 boltz2's TOKEN WIDENS to its largest one-token modified residue (af3-any-model e2a2246: 32 slots for a
+ * 2'-O-methylguanosine's 25 CCD atoms), where this port keeps 24. When nothing real lies past slot `dense` the two are
+ * the same batch padded differently, so the reference's per-atom arrays are cut to `dense` slots and its gathers'
+ * flat atom indices re-based; when something does, it is left as it is and every per-atom field says so.
+ */
+function narrowDense(dump, dense) {
+  const mask = dump.inputs?.ref_mask;
+  if (mask === undefined || mask.shape.length < 2 || mask.shape[1] <= dense) return dump;
+  const [tokens, wide] = mask.shape;
+  for (let t = 0; t < tokens; t += 1) {
+    for (let k = dense; k < wide; k += 1) if (mask.data[t * wide + k] > 0) return dump;
+  }
+  for (const [name, value] of Object.entries(dump.inputs)) {
+    const shape = value.shape;
+    if (name.endsWith(":gather_idxs") || name.endsWith(":gather_mask")) {
+      const base = name.slice(0, name.lastIndexOf(":"));
+      const from = dump.inputs[`${base}:input_shape`]?.data ?? [];
+      let data = value.data;
+      // indices INTO the dense grid re-based; an index past the narrow slots is only ever padding
+      if (name.endsWith(":gather_idxs") && from.length >= 2 && from[0] === tokens && from[1] === wide) {
+        data = data.map((k) => (k % wide < dense ? Math.floor(k / wide) * dense + (k % wide) : 0));
+      }
+      // ...and a gather whose OUTPUT is the dense grid cut to it
+      if (shape.length >= 2 && shape[0] === tokens && shape[1] === wide) {
+        const inner = shape.slice(2).reduce((a, b) => a * b, 1);
+        const out = [];
+        for (let t = 0; t < tokens; t += 1) out.push(...data.slice(t * wide * inner, (t * wide + dense) * inner));
+        data = out;
+        value.shape = [tokens, dense, ...shape.slice(2)];
+      }
+      value.data = data;
+      continue;
+    }
+    if (name.endsWith(":input_shape")) {
+      if (value.data[0] === tokens && value.data[1] === wide) value.data = [tokens, dense, ...value.data.slice(2)];
+      continue;
+    }
+    if (shape.length >= 2 && shape[0] === tokens && shape[1] === wide) {
+      const inner = shape.slice(2).reduce((a, b) => a * b, 1);
+      const out = [];
+      for (let t = 0; t < tokens; t += 1) out.push(...value.data.slice(t * wide * inner, (t * wide + dense) * inner));
+      value.data = out;
+      value.shape = [tokens, dense, ...shape.slice(2)];
+    }
+  }
+  return dump;
+}
+
+// One place that turns a model into a batch, because there are two loops below
+// and the first version let `--falsify` reach only one of them - so the
+// centroid arm silently measured the SHIPPED options while claiming to measure
+// the falsified ones, and read as "this convention is unobservable".
+function batchFor(dialect, target) {
+  // 🔴 THROUGH `af3BatchFromA3m` AND `featuriserDialect`, NOT STRAIGHT INTO THE
+  // FEATURISER. This called `featuriseProtein` with a hand-picked option list
+  // at first, and that is the same allow-list shape it was written to catch:
+  // shared/af3/featurise/batch.js forwards the dialect to the featuriser field by field, and
+  // a gate that skips it would stay green while the PAGE and every fold tool
+  // silently dropped a convention. The one path the shipped fold takes is the
+  // one to measure.
+  const options = { ...featuriserDialect(dialect), ...TARGETS[target].extra() };
+  if (falsify !== "") {
+    if (!(falsify in options)) {
+      throw new Error(`--falsify=${falsify} is not a dialect field the featuriser reads`);
+    }
+    options[falsify] = !options[falsify];
+  }
+  return options;
+}
+let failures = 0;
+let missing = 0;
+for (const target of Object.keys(TARGETS)) {
+  if (onlyTarget !== "" && target !== onlyTarget) continue;
+  console.log(`\n=== target ${target}`);
+  for (const model of MODELS) {
+  if (only !== "" && model !== only) continue;
+  const dump = dumpFor(model, target);
+  if (dump === null) { missing += 1; console.log(`${model.padEnd(14)} no dump`); continue; }
+  const dialect = dialectFor(model);
+  const batch = af3BatchFromA3m(dump.sequence, TARGETS[target].alignment?.() ?? null,
+                                batchFor(dialect, target)).batch;
+
+  const bad = [];
+  const floor = [];   // deliberate deviations: reported every run, never failed
+  const notes = [];
+  const seen = new Set();
+  for (const [name, pick] of Object.entries(FIELDS)) {
+    const theirs = flat(dump.inputs[name]).map(Number);
+    if (theirs.length === 0) continue;
+    seen.add(name);
+    // 🔴 chai1's reference batch is dumped through fold_check, which featurises with has_msa=False, so its
+    // no-alignment zeroing (model_features.py _zero_msa) fires even on a target that HAS one - while this port,
+    // handed that alignment, rightly keeps it. Those two fields are reported, not asserted, there.
+    // (a dump made with --has-msa featurised the alignment as run_alphafold.py does, and is compared)
+    if (model === "chai1" && TARGETS[target].alignment && dump.hasMsa !== true && (name === "profile" || name === "deletion_mean")) {
+      floor.push(`${name}: the reference dumped with no alignment (fold_check has_msa=False), this port with one`);
+      continue;
+    }
+    const ours = pick(batch);
+    if (ours === undefined) { notes.push(`${name}: unmapped`); continue; }
+    // 🔴 chai1's ATOMISED RESIDUE IS UNKNOWN, WHERE af3-any-model's CHAI GIVES IT THE PARENT: chai-lab's restype is
+    // gemmi's fasta_code(), which is X for every modified residue (SEP, TPO, MSE ...), and its ESM2 sequence
+    // reads X there too. Followed here (atomizedUnknownRestype) because it moves the fold - a phosphoserine's
+    // bonds 0.21 -> 0.11 A rms, chai-lab 0.07. Reported where the tokens are atomised and ours read 20;
+    // every other token is still asserted.
+    if (model === "chai1" && name === "aatype") {
+      const tokensOf = new Map();
+      for (const r of batch.residueOfToken) if (r >= 0) tokensOf.set(r, (tokensOf.get(r) ?? 0) + 1);
+      let atomised = 0, other = 0;
+      for (let t = 0; t < Math.min(ours.length, theirs.length); t += 1) {
+        if (Number(ours[t]) === theirs[t]) continue;
+        const r = batch.residueOfToken[t];
+        if (r >= 0 && tokensOf.get(r) > 1 && Number(ours[t]) === 20) atomised += 1; else other += 1;
+      }
+      if (other !== 0) bad.push(`aatype: ${other} tokens differ that are not an atomised residue's`);
+      if (atomised !== 0) floor.push(`aatype: ${atomised} atomised-residue tokens unknown (chai-lab's gemmi X) where the reference has the parent`);
+      continue;
+    }
+    if (name === "declared_bonds") {
+      const edges = (m, n) => { const e = []; for (let k = 0; k < m.length; k += 1) if (Number(m[k]) !== 0) e.push(`${Math.floor(k / n)}>${k % n}`); return e.sort(); };
+      const a = edges(ours, batch.tokens).join(" "), b = edges(theirs, Math.round(Math.sqrt(theirs.length))).join(" ");
+      if (a !== b) bad.push(`declared_bonds: ours [${a}] theirs [${b}]`);
+      continue;
+    }
+    // 🔴 COMPARE THE OVERLAP AND SAY SO. Their atom axis is the dense grid and
+    // ours is compacted for some models; a length difference is reported as
+    // its own line rather than silently truncating the comparison to nothing.
+    const n = Math.min(ours.length, theirs.length);
+    const bound = BOUNDS[name] ?? BOUNDS.default;
+    const width = WIDTH[name] ?? 1;
+    const perAtom = PER_ATOM.has(name);
+    const theirLive = flat(dump.inputs.ref_mask).map(Number);
+    let differ = 0;
+    let worst = 0;
+    let skipped = 0;
+    const shown = [];
+    for (let at = 0; at < n; at += 1) {
+      // Live on BOTH sides, since a slot either side calls padding carries
+      // whatever each happens to leave there.
+      if (perAtom) {
+        const slot = Math.floor(at / width);
+        if (!(theirLive[slot] > 0.5) || !(batch.refMask[slot] > 0.5)) { skipped += 1; continue; }
+      }
+      const delta = Math.abs(Number(ours[at]) - theirs[at]);
+      if (delta > worst) worst = delta;
+      if (delta > bound) {
+        differ += 1;
+        if (show === name && shown.length < 40) shown.push(`${at}:${Number(ours[at])}/${theirs[at]}`);
+      }
+    }
+    if (shown.length > 0) notes.push(`${name} (index:ours/theirs) ${shown.join(" ")}`);
+    const lengths = ours.length === theirs.length
+      ? "" : ` [ours ${ours.length} theirs ${theirs.length}]`;
+    const pad = skipped === 0 ? "" : ` (${skipped} padded slots not compared)`;
+    if (differ !== 0) {
+      // 🔴 ref_pos IS THE ONE DELIBERATE DEVIATION AND MUST NOT TURN THIS GATE
+      // RED FOREVER. A gate that is always failing is a gate nobody reads. It
+      // is reported on every run with its size, and the frame-free section
+      // below is what says whether it is still only a frame-and-rotamer
+      // difference. Anything else here is a defect.
+      const line = `${name}: ${differ}/${n - skipped} worst ${worst.toPrecision(3)}${lengths}${pad}`;
+      (name === "ref_pos" ? floor : bad).push(line);
+    } else if (verbose) {
+      notes.push(`${name}: ${n - skipped} ok worst ${worst.toPrecision(3)}${lengths}${pad}`);
+    }
+  }
+  for (const [name, pick] of Object.entries(GATHERS)) {
+    const idx = flat(dump.inputs[`${name}:gather_idxs`]).map(Number);
+    const msk = flat(dump.inputs[`${name}:gather_mask`]).map(Number);
+    if (idx.length === 0) continue;
+    seen.add(`${name}:gather_idxs`); seen.add(`${name}:gather_mask`);
+    seen.add(`${name}:input_shape`);
+    const ours = pick(batch);
+    if (ours === undefined) { notes.push(`${name}: unmapped gather`); continue; }
+    let maskDiff = 0;
+    let indexDiff = 0;
+    let live = 0;
+    const n = Math.min(ours.indices.length, idx.length);
+    for (let at = 0; at < n; at += 1) {
+      const mine = ours.mask[at] > 0.5;
+      const theirs = msk[at] > 0.5;
+      if (mine !== theirs) { maskDiff += 1; continue; }
+      if (!mine) continue;
+      live += 1;
+      if (Number(ours.indices[at]) !== idx[at]) indexDiff += 1;
+    }
+    if (maskDiff !== 0 || indexDiff !== 0) {
+      bad.push(`${name}: mask ${maskDiff} index ${indexDiff} of ${live} live`);
+    } else if (verbose) notes.push(`${name}: ${live} live ok`);
+  }
+  // 🔴 THE BOND GATHERS ARE COMPARED BY CONTENT, NOT BY REPRESENTATION. This
+  // port carries bonds as a dense `tokens x tokens` matrix and the reference as
+  // a list of token pairs, so a gate that asks "did you build this field"
+  // answers no for both a port that has the bonds and one that does not. The
+  // first version did exactly that and reported all seven models missing the
+  // ligand bonds, when six of them have every bond the reference has. Compare
+  // the SET of bonded token pairs.
+  // 🔴 AND THE TWO TOKEN-LEVEL GATHERS ARE ONE MATRIX. AF3's token_bonds sets [i][j] for every pair
+  // in tokens_to_polymer_ligand_bonds AND tokens_to_ligand_ligand_bonds (evoformer.py's contact
+  // matrix), so the comparison is against their UNION - a target with a polymer-ligand bond (the
+  // glycan's Asn34-NAG link) put that pair in one list and the rest in the other, and comparing each
+  // list against the whole matrix reported every bond as extra in one of them. The ATOM-level
+  // token_atoms_to_polymer_ligand_bonds is read by no model's trunk and is noted, not compared.
+  const theirs = new Set();
+  let anyGather = false;
+  for (const name of BOND_GATHERS) {
+    const idx = flat(dump.inputs[`${name}:gather_idxs`]).map(Number);
+    const msk = flat(dump.inputs[`${name}:gather_mask`]).map(Number);
+    if (idx.length === 0) continue;
+    seen.add(`${name}:gather_idxs`); seen.add(`${name}:gather_mask`);
+    seen.add(`${name}:input_shape`);
+    if (name.startsWith("token_atoms_")) {
+      if (verbose) notes.push(`${name}: atom-level, read by no model (not compared)`);
+      continue;
+    }
+    anyGather = true;
+    for (let k = 0; k * 2 + 1 < idx.length; k += 1) {
+      if (!(msk[k * 2] > 0.5)) continue;
+      theirs.add(`${idx[k * 2]}-${idx[k * 2 + 1]}`);
+    }
+  }
+  if (anyGather) {
+    const name = "token bonds (both gathers)";
+    if (theirs.size === 0 && verbose) notes.push(`${name}: dead on both sides`);
+    // 🔴 AND DIRECTION IS PART OF THE QUESTION, WHICH THE FIRST VERSION THREW
+    // AWAY. It compared undirected edges, on the reasoning that the reference
+    // lists most bonds one way round while this port's matrix is symmetric -
+    // and that reasoning discards `symmetriseBonds`, the convention this whole
+    // field exists for. Measured on gol-sep3: AlphaFold 3's DIRECTED set is
+    // ours exactly, 14 against 14 with nothing either way, and the symmetrising
+    // dialects have exactly 14 more, which is each internal bond's reverse. So
+    // the expectation is the reference's own pairs plus their reverses where
+    // the dialect symmetrises - exact, and it makes the convention visible.
+    const expected = new Set(theirs);
+    if (dialect.symmetriseBonds === true) {
+      for (const pair of theirs) {
+        const [a, b] = pair.split("-").map(Number);
+        expected.add(`${b}-${a}`);
+      }
+    }
+    const ours = new Set();
+    if (batch.bondMatrix !== undefined) {
+      for (let i = 0; i < batch.tokens; i += 1) {
+        for (let j = 0; j < batch.tokens; j += 1) {
+          // (a self-bond is boltz2's self_bond_type, compared as its own field: the gathers never hold one)
+          if (batch.bondMatrix[i * batch.tokens + j] && i !== j) ours.add(`${i}-${j}`);
+        }
+      }
+    }
+    const missing = [...expected].filter((p) => !ours.has(p));
+    const extra = [...ours].filter((p) => !expected.has(p));
+    // 🔴 AND THE BOND ORDER, WHICH SAT IN THE "ABSENT" LIST SAYING "no ligand on
+    // this target" - true of 6MRR and false of gol-sep3, so the moment a target
+    // had bonds the gate stopped comparing the one channel that was empty.
+    // boltz2 reads it as the second plane of its z-init bond feature and was
+    // getting zeros; see the note in featurise.js. (Its pairs are the
+    // ligand-ligand gather's.)
+    const idx = flat(dump.inputs["tokens_to_ligand_ligand_bonds:gather_idxs"]).map(Number);
+    const msk = flat(dump.inputs["tokens_to_ligand_ligand_bonds:gather_mask"]).map(Number);
+    const orders = flat(dump.inputs.ligand_ligand_bond_order).map(Number);
+    let orderDiff = 0;
+    // 🔴 A SMILES LIGAND'S BOND ORDERS ARE A REPORTED DEVIATION, NOT A FAILURE. The reference
+    // looks a bond's order up in the component's CCD entry, and a SMILES-only ligand has none:
+    // `_ccd_bond_orders` returns an empty mapping and every bond reads OTHER (0) - its own docstring
+    // says so. This port carries the molecule's real orders, which is what genuine Boltz-2 (the one
+    // model that reads the feature) featurises from RDKit; the reference's 0 is a gap in its lookup.
+    const smilesTokens = new Set();
+    for (const span of batch.ligandSpans ?? []) {
+      if ((TARGETS[target].smilesCodes?.() ?? []).includes(span.code)) {
+        for (let t = span.from; t < span.from + span.count; t += 1) smilesTokens.add(t);
+      }
+    }
+    let smilesOrders = 0;
+    if (orders.length > 0 && batch.bondOrderMatrix !== undefined) {
+      seen.add("ligand_ligand_bond_order");
+      for (let k = 0; k * 2 + 1 < idx.length; k += 1) {
+        if (!(msk[k * 2] > 0.5)) continue;
+        const a = idx[k * 2];
+        const b = idx[k * 2 + 1];
+        if (a === b) continue;
+        if (batch.bondOrderMatrix[a * batch.tokens + b] !== orders[k]) {
+          if (orders[k] === 0 && smilesTokens.has(a) && smilesTokens.has(b)) smilesOrders += 1;
+          else orderDiff += 1;
+        }
+      }
+      if (smilesOrders !== 0) {
+        floor.push(`ligand_ligand_bond_order: ${smilesOrders} SMILES-ligand pairs the reference has as OTHER (no CCD entry to read) and this port as the molecule's own orders`);
+      }
+      if (orderDiff !== 0) {
+        bad.push(`ligand_ligand_bond_order: ${orderDiff} pairs with the wrong order`);
+      } else if (verbose) {
+        notes.push(`ligand_ligand_bond_order: exact over the ligand-ligand gather`);
+      }
+    }
+    if (missing.length !== 0 || extra.length !== 0) {
+      bad.push(`${name}: ${missing.length} bonds the reference has and this port`
+        + ` does not${missing.length === 0 ? "" : ` (${missing.slice(0, 6).join(" ")})`}`
+        + `, ${extra.length} the other way`
+        + `${extra.length === 0 ? "" : ` (${extra.slice(0, 6).join(" ")})`}`);
+    } else if (verbose) {
+      notes.push(`${name}: ${expected.size} directed bonded token pairs, exact`);
+    }
+  }
+  // 🔴 OpenDDE's SECOND TOKEN SPACE, which this port builds in
+  // shared/af3/featurise/structural-tokens.js and which nothing compared for as long as it
+  // existed. `structbook/*` is the mapping that DEFINES the space - which
+  // parent residue each subtoken belongs to, its role, its twin - so if it is
+  // wrong every stage after it is wrong on a shipped model.
+  const structural = Object.keys(dump.inputs)
+    .filter((k) => k.startsWith("struct/") || k.startsWith("structbook/"));
+  // 🔴 EVERY `struct/*` KEY IS MARKED SEEN WHOLESALE, so the UNMAPPED check
+  // below cannot see a structural field nothing compares - which is how
+  // `struct/token_atoms_to_pseudo_beta` sat in the dump uncompared.
+  for (const k of structural) seen.add(k);
+  if (structural.length > 0) {
+    const found = compareStructural(dump, batch);
+    for (const line of found.bad) bad.push(line);
+    for (const line of found.floor) floor.push(line);
+    for (const line of found.notes) notes.push(line);
+  }
+
+  const unmapped = Object.keys(dump.inputs)
+    .filter((k) => !seen.has(k) && ABSENT[k] === undefined);
+  // 🔴 THE is_paired COLUMN (boltz2 and rf3 read it; intellifold2's network does not): the query row is paired for
+  // boltz2 always and for rf3 once an alignment adds a row - what msaPairedQueryRow(Aligned) gives the embedders. A
+  // reference row past the query that is paired is a cross-chain pairing flag this port does not carry: reported.
+  if (dump.inputs.msa_paired !== undefined && ["boltz2", "rosettafold3"].includes(model)) {
+    const paired = flat(dump.inputs.msa_paired).map(Number);
+    const width = dump.inputs.msa_paired.shape[1];
+    const row0 = paired.slice(0, width);
+    const want = dialect.msaPairedQueryRow === true
+      || (dialect.msaPairedQueryRowAligned === true && batch.sequences > 1) ? 1 : 0;
+    const off = row0.filter((v) => v !== want).length;
+    if (off > 0) bad.push(`msa_paired: query row ${off}/${width} not ${want}`);
+    const later = paired.slice(width).some((v) => v !== 0);
+    if (later) bad.push("msa_paired: rows past the query are paired (cross-chain pairing, not carried)");
+  }
+  if (unmapped.length > 0) bad.push(`UNMAPPED: ${unmapped.join(" ")}`);
+
+  const status = bad.length === 0
+    ? (floor.length === 0 ? "EXACT" : "EXACT but for the conformer floor") : "DIFFERS";
+  console.log(`${model.padEnd(14)} ${String(seen.size).padStart(2)} fields compared`
+    + `  ${status}`);
+  for (const line of bad) console.log(`    🔴 ${line}`);
+  for (const line of floor) console.log(`    floor  ${line}`);
+  for (const line of notes) console.log(`       ${line}`);
+  if (bad.length !== 0) failures += 1;
+  }
+}
+const targets = Object.keys(TARGETS).filter((t) => onlyTarget === "" || t === onlyTarget);
+const checked = MODELS.filter((m) => only === "" || m === only).length * targets.length;
+console.log(`\n${checked - missing - failures} model/target pairs exact on the compared`
+  + ` fields, ${failures} differing, ${missing} without a dump`);
+const unlisted = Object.keys(DIALECTS).filter((m) => !MODELS.includes(m));
+if (unlisted.length > 0) {
+  console.log(`🔴 a dialect has no dump here, so its batch is unchecked: ${unlisted.join(", ")}`);
+}
+
+// 🔴 AND `ref_pos` DESERVES A FRAME-FREE QUESTION, BECAUSE THE ELEMENTWISE ONE
+// IS PARTLY MEANINGLESS. An idealised conformer has an ARBITRARY rigid frame:
+// the reference reads CCD geometry in the CCD's own orientation and this port
+// generates its own, so two identical molecules can differ by 9 A elementwise
+// while being the same shape. The elementwise number above is what the network
+// actually consumes (`embed_ref_pos` is a linear layer, so orientation reaches
+// it) and is the honest size of this port's documented conformer floor. This
+// asks the other half: are they the same MOLECULE? Intra-residue pairwise
+// distances are invariant to rotation and translation, so a small number here
+// with a large number above means "same geometry, different frame" - a
+// deliberate deviation - and a large number here would mean a wrong conformer,
+// which is a defect. The distinction is not visible in either number alone.
+
+/**
+ * OpenDDE's second token space, against the reference's `struct/` and
+ * `structbook/`.
+ *
+ * 🔴 THE REFERENCE PADS AND THIS PORT DOES NOT, so every comparison is over the
+ * first `tokens` entries: 130 real subtokens against a batch bucketed to 160,
+ * with `struct/seq_mask` zero across the tail. Comparing the whole array would
+ * report thirty tokens of padding as a disagreement.
+ *
+ * 🔴 AND `ref_space_uid` IS COMPARED AS A PARTITION, NOT ELEMENTWISE. It exists
+ * to answer "are these two atoms in the same space", so the LABELS are
+ * arbitrary and only the grouping is meaningful: this port numbers densely from
+ * zero and the reference skips a number, which differs in 3116 of 3120 slots
+ * and means nothing. Both give 68 spaces containing exactly the same atoms.
+ * Elementwise it looks like a defect; as a partition it is exact.
+ */
+function compareStructural(dump, batch) {
+  const bad = [];
+  const floor = [];
+  const notes = [];
+  const layout = structuralLayout(batch);
+  const structural = structuralBatch(batch, layout);
+  const tokens = layout.tokens;
+  const flatten = (name) => flat(dump.inputs[name]).map(Number);
+
+  const live = flatten("struct/seq_mask");
+  if (live.length > tokens && live.slice(tokens).some((v) => v > 0.5)) {
+    bad.push(`struct/: the reference has live tokens past our ${tokens}`);
+    return { bad, floor, notes };
+  }
+
+  // The mapping that defines the space. `structbook` is the reference's name.
+  const BOOK = {
+    parent: "structbook/parent_residue_idx", role: "structbook/subtoken_role_id",
+    twin: "structbook/twin_token_idx", prevParent: "structbook/prev_parent_residue_idx",
+    nextParent: "structbook/next_parent_residue_idx",
+    residueAtomGather: "structbook/residue_atom_gather",
+    residueRepToken: "structbook/residue_rep_token",
+  };
+  for (const [ours, theirs] of Object.entries(BOOK)) {
+    const mine = layout[ours];
+    const yours = flatten(theirs);
+    if (yours.length === 0) continue;
+    if (mine === undefined) { bad.push(`${theirs}: this port does not build it`); continue; }
+    let differ = 0;
+    for (let at = 0; at < Math.min(mine.length, yours.length); at += 1) {
+      if (Number(mine[at]) !== yours[at]) differ += 1;
+    }
+    if (differ !== 0) bad.push(`${theirs}: ${differ} of ${mine.length} differ`);
+  }
+
+  // The per-token and per-atom fields, over the real tokens only.
+  const FIELDS = {
+    aatype: "struct/aatype", asymId: "struct/asym_id", entityId: "struct/entity_id",
+    symId: "struct/sym_id", residueIndex: "struct/residue_index",
+    tokenIndex: "struct/token_index", seqMask: "struct/seq_mask",
+    profile: "struct/profile", deletionMean: "struct/deletion_mean",
+    refMask: "struct/ref_mask", refElement: "struct/ref_element",
+    refCharge: "struct/ref_charge", refAtomNameChars: "struct/ref_atom_name_chars",
+    predDenseAtomMask: "struct/pred_dense_atom_mask", refPos: "struct/ref_pos",
+  };
+  for (const [ours, theirs] of Object.entries(FIELDS)) {
+    const mine = structural[ours];
+    const yours = flatten(theirs);
+    if (yours.length === 0 || mine === undefined) continue;
+    const bound = theirs === "struct/ref_pos" ? 2.5 : 1e-6;
+    let differ = 0;
+    let worst = 0;
+    for (let at = 0; at < mine.length && at < yours.length; at += 1) {
+      const delta = Math.abs(Number(mine[at]) - yours[at]);
+      if (delta > worst) worst = delta;
+      if (delta > bound) differ += 1;
+    }
+    if (differ === 0) continue;
+    const line = `${theirs}: ${differ}/${mine.length} worst ${worst.toPrecision(3)}`;
+    (theirs === "struct/ref_pos" ? floor : bad).push(line);
+  }
+
+  // 🔴 THE STRUCTURAL PSEUDO-BETA GATHER, WHICH NOTHING COMPARED. `GATHERS`
+  // above carries `token_atoms_to_pseudo_beta` - the RESIDUE-space one - and
+  // the structural-space twin sits in the dump beside it, uncompared. It is
+  // the ONE geometric input OpenDDE's confidence head takes: the head adds a
+  // binned AND a raw embedding of the distances between these atoms, so a
+  // gather that picked the wrong atom would move the PAE and nothing here
+  // would object. Same shape as the atom-key window, which was wrong in four
+  // of seven models because no gate asked.
+  {
+    const idx = flat(dump.inputs["struct/token_atoms_to_pseudo_beta:gather_idxs"]).map(Number);
+    const msk = flat(dump.inputs["struct/token_atoms_to_pseudo_beta:gather_mask"]).map(Number);
+    const mine = structural.tokenAtomsToPseudoBeta;
+    // Never a silent skip: a dump that carries the field and a port that does
+    // not build it is the finding, not a reason to compare nothing.
+    if (idx.length > 0 && mine === undefined) {
+      bad.push("struct/token_atoms_to_pseudo_beta: this port does not build it");
+    } else if (idx.length > 0) {
+      let differ = 0;
+      for (let at = 0; at < idx.length && at < mine.indices.length; at += 1) {
+        const live = msk[at] > 0.5;
+        if (live !== (Number(mine.mask[at]) > 0.5)) { differ += 1; continue; }
+        if (live && Number(mine.indices[at]) !== idx[at]) differ += 1;
+      }
+      if (differ > 0) {
+        bad.push(`struct/token_atoms_to_pseudo_beta: ${differ}/${idx.length} differ`);
+      }
+    }
+  }
+
+  // ref_space_uid as a PARTITION - see the note above.
+  {
+    const theirs = flatten("struct/ref_space_uid");
+    const mask = flatten("struct/pred_dense_atom_mask");
+    const group = (values) => {
+      const spaces = new Map();
+      for (let at = 0; at < structural.refSpaceUid.length && at < theirs.length; at += 1) {
+        if (!(mask[at] > 0.5)) continue;
+        const key = values[at];
+        if (!spaces.has(key)) spaces.set(key, []);
+        spaces.get(key).push(at);
+      }
+      return [...spaces.values()].map((slots) => slots.join(" ")).sort();
+    };
+    const mine = group(structural.refSpaceUid);
+    const yours = group(theirs);
+    if (JSON.stringify(mine) !== JSON.stringify(yours)) {
+      bad.push(`struct/ref_space_uid: ${mine.length} spaces here against ${yours.length}`
+        + " - the atoms are grouped differently, which changes what may be compared");
+    } else if (verbose) {
+      notes.push(`struct/ref_space_uid: ${mine.length} spaces, the same partition`
+        + " (the labels differ and are arbitrary)");
+    }
+  }
+
+  notes.push(`${tokens} structural subtokens compared`
+    + ` against the reference's ${live.length} padded`);
+  return { bad, floor, notes };
+}
+
+let centroidFailures = 0;
+{
+  console.log("\nref_pos, frame-free: intra-token pairwise distances");
+  for (const target of Object.keys(TARGETS)) {
+    if (onlyTarget !== "" && target !== onlyTarget) continue;
+    console.log(`  target ${target}`);
+    for (const model of MODELS) {
+    if (only !== "" && model !== only) continue;
+    const dump = dumpFor(model, target);
+    if (dump === null) continue;
+    const dialect = dialectFor(model);
+    const batch = af3BatchFromA3m(dump.sequence, null, batchFor(dialect, target)).batch;
+    const theirPos = flat(dump.inputs.ref_pos).map(Number);
+    const theirMask = flat(dump.inputs.ref_mask).map(Number);
+    const dense = batch.dense;
+    let worst = 0;
+    let sum = 0;
+    let pairs = 0;
+    let worstToken = -1;
+    for (let token = 0; token < batch.tokens; token += 1) {
+      const live = [];
+      for (let slot = 0; slot < dense; slot += 1) {
+        const at = token * dense + slot;
+        if (theirMask[at] > 0.5 && batch.refMask[at] > 0.5) live.push(at);
+      }
+      for (let a = 0; a < live.length; a += 1) {
+        for (let b = a + 1; b < live.length; b += 1) {
+          const d = (pos, i, j) => Math.hypot(
+            pos[i * 3] - pos[j * 3], pos[i * 3 + 1] - pos[j * 3 + 1],
+            pos[i * 3 + 2] - pos[j * 3 + 2]);
+          const delta = Math.abs(d(batch.refPos, live[a], live[b])
+                                 - d(theirPos, live[a], live[b]));
+          sum += delta * delta;
+          pairs += 1;
+          if (delta > worst) { worst = delta; worstToken = token; }
+        }
+      }
+    }
+    const rms = Math.sqrt(sum / Math.max(pairs, 1));
+    // 🔴 AND THE CENTROID, WHICH IS THE ONE THING NEITHER OTHER TEST CAN SEE.
+    // `centreRefConformers` is a pure TRANSLATION: invariant to intra-token
+    // distances, and buried in ref_pos's floor bucket elementwise - so
+    // `--falsify=centreRefConformers` left this whole gate green until this
+    // was added. A centred conformer's token centroid is 0 and an uncentred
+    // one's is not, so comparing the two centroids' magnitudes names the
+    // convention directly.
+    let ourCentroid = 0;
+    let theirCentroid = 0;
+    let counted = 0;
+    for (let token = 0; token < batch.tokens; token += 1) {
+      const live = [];
+      for (let slot = 0; slot < dense; slot += 1) {
+        const at = token * dense + slot;
+        if (theirMask[at] > 0.5 && batch.refMask[at] > 0.5) live.push(at);
+      }
+      if (live.length === 0) continue;
+      const mean = (pos) => {
+        let x = 0; let y = 0; let z = 0;
+        for (const at of live) { x += pos[at * 3]; y += pos[at * 3 + 1]; z += pos[at * 3 + 2]; }
+        return Math.hypot(x, y, z) / live.length;
+      };
+      ourCentroid += mean(batch.refPos);
+      theirCentroid += mean(theirPos);
+      counted += 1;
+    }
+    ourCentroid /= Math.max(counted, 1);
+    theirCentroid /= Math.max(counted, 1);
+    // 🔴 COMPARE THE CONVENTION, NOT THE MAGNITUDE. Two UNCENTRED conformer
+    // sets have centroids of 1.480 and 1.580 - a 0.1 A difference that is just
+    // the rotamer difference above showing up in a mean - and the first version
+    // of this line called that a disagreement. What is being asked is binary:
+    // does this side subtract the token centroid or not.
+    const CENTRED = 0.05;   // A: a centred conformer's centroid is exactly 0
+    // 🔴 AND A TRANSLATING FAMILY (OpenDDE, protenix: `translateConformers`) CENTRES AND THEN MOVES EACH REFERENCE
+    // SPACE BY U(-1, 1) PER AXIS, from a draw each side makes its own way - so its centroid is neither 0 nor the CCD's,
+    // and the convention is that every space's centroid lies in the unit cube. An uncentred CCD conformer leaves it.
+    const inCube = (pos, mask) => {
+      const sums = new Map();
+      for (let at = 0; at < batch.tokens * dense; at += 1) {
+        if (!(mask[at] > 0.5) || !(theirMask[at] > 0.5 && batch.refMask[at] > 0.5)) continue;
+        const uid = batch.refSpaceUid[at];
+        const e = sums.get(uid) ?? [0, 0, 0, 0];
+        e[0] += pos[at * 3]; e[1] += pos[at * 3 + 1]; e[2] += pos[at * 3 + 2]; e[3] += 1;
+        sums.set(uid, e);
+      }
+      for (const e of sums.values()) {
+        for (let k = 0; k < 3; k += 1) if (Math.abs(e[k] / e[3]) > 1.0 + 1e-4) return false;
+      }
+      return true;
+    };
+    // (three answers wherever it is asked: a centred space is in the cube too, at its centre)
+    const label = (centroid, pos, mask) => (centroid < CENTRED ? "centred"
+      : dialect.translateConformers === true && inCube(pos, mask) ? "translated" : "uncentred");
+    const ours = label(ourCentroid, batch.refPos, batch.refMask), theirs = label(theirCentroid, theirPos, theirMask);
+    const centred = ours === theirs ? `both ${ours}` : `🔴 DIFFER (ours ${ours}, theirs ${theirs})`;
+    console.log(`  ${model.padEnd(14)} ${String(pairs).padStart(5)} intra-token pairs`
+      + `  rms ${rms.toFixed(4)} A  worst ${worst.toFixed(4)} A`
+      + (worstToken < 0 ? "" : ` (token ${worstToken}, aatype ${batch.aatype[worstToken]})`)
+      + `  centroid ${ourCentroid.toFixed(3)}/${theirCentroid.toFixed(3)} ${centred}`);
+    if (centred.startsWith("🔴")) centroidFailures += 1;
+    }
+  }
+}
+
+// The verdict covers BOTH sections. Without this the centroid arm could fail
+// while the line above still read "7 models exact", which is how a gate starts
+// lying about itself.
+if (centroidFailures > 0) {
+  console.log(`🔴 ${centroidFailures} models disagree on the conformer CENTRING convention`);
+}
+if (failures > 0 || centroidFailures > 0) process.exitCode = 1;
+else console.log("every dumped model's batch matches the reference's, "
+  + "but for the shared-conformer floor");

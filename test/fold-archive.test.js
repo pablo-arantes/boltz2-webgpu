@@ -1,0 +1,584 @@
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "./harness.js";
+import {
+  buildFoldArchive, fullDataJson, jobRequestJson, msasFromArchive, templatesFromArchive,
+  summaryConfidencesJson, tokenIdentifiers,
+} from "../web/fold-archive.js";
+import { safeJobName } from "../web/prediction-results.js";
+import { readZip, writeZip } from "../web/zip.js";
+import { mergeSearchedChains } from "../shared/input/mmseqs2-api.js";
+
+// Two residues per chain, one atom each, so the atom arrays are checkable by eye.
+function pdb(chains) {
+  const lines = [];
+  let serial = 1;
+  chains.forEach((length, chain) => {
+    const id = "AB"[chain];
+    for (let within = 0; within < length; within += 1) {
+      lines.push(`ATOM  ${String(serial).padStart(5)}  CA  ALA ${id}`
+        + `${String(within + 1).padStart(4)}    `
+        + `${(serial).toFixed(3).padStart(8)}${(0).toFixed(3).padStart(8)}`
+        + `${(0).toFixed(3).padStart(8)}  1.00${(70 + serial).toFixed(2).padStart(6)}`
+        + "           C");
+      serial += 1;
+    }
+  });
+  lines.push("END");
+  return `${lines.join("\n")}\n`;
+}
+
+const square = (tokens, value) =>
+  Float32Array.from({ length: tokens * tokens }, (_, index) => value(
+    Math.floor(index / tokens), index % tokens));
+
+function prediction(chainLengths = [2, 2]) {
+  const tokens = chainLengths.reduce((total, length) => total + length, 0);
+  return {
+    pdb: pdb(chainLengths),
+    chainLengths,
+    confidence: {
+      plddt: Float32Array.from({ length: tokens }, (_, index) => (index === 0 ? 30 : 88)),
+      meanPlddt: 74.5,
+      ptm: 0.8123,
+      iptm: 0.5567,
+      chainPairIptm: { "0|1": 0.5567 },
+      predictedAlignedError: square(tokens, (i, j) => Math.abs(i - j) + 0.456),
+      maxPredictedAlignedError: 31.5,
+      contactProbs: square(tokens, (i, j) => (i === j ? 1 : 0.2)),
+    },
+  };
+}
+
+describe("the fold archive", () => {
+  const entities = [
+    { type: "protein", value: "ACDE", copies: 2, template: { kind: "pdb", source: "1abc" } },
+    { type: "ligand", value: "hem", copies: 1 },
+  ];
+
+  // 🔴 THE TEMPLATES COME BACK AS THE STRUCTURES THAT WERE USED, CHAIN AND ALL.
+  // The request can only say `useStructureTemplate: true`, which reads back as
+  // a search; the file names say the FOLD chain and not the structure's, and
+  // 1BRS's barstar is chain D of its file.
+  it("carries each template's structure chain for the way back", () => {
+    const files = buildFoldArchive({
+      stem: "fold_test", model: "AlphaFold 2 (multimer)", settings: { seed: 7 },
+      entities, prediction: prediction(),
+      templates: [
+        { chain: 0, text: "ATOM      1  CA  ALA A   1\n", chainId: "A", source: "1brs.pdb" },
+        { chain: 1, text: "ATOM      1  CA  ALA D   1\n", chainId: "D", source: "1brs.pdb" },
+      ],
+    });
+    expect(files.has("templates/fold_test_template_hit_1_chains_b.pdb")).toBe(true);
+    const back = templatesFromArchive(files);
+    expect(back.map((t) => [t.chain, t.structureChain, t.filename])).toEqual(
+      [[0, "A", "1brs.pdb"], [1, "D", "1brs.pdb"]]);
+    expect(back[1].text.includes("ALA D")).toBe(true);
+    // ...and an archive without the index (the server's) restores none.
+    files.delete("templates/fold_test_templates.json");
+    expect(templatesFromArchive(files)).toEqual([]);
+  });
+
+  it("writes the members the AlphaFold 3 server writes", () => {
+    const files = buildFoldArchive({
+      stem: "fold_test", model: "AlphaFold 3", settings: { seed: 7 },
+      entities, prediction: prediction(),
+      msas: { unpaired: ["u-a", "u-b"], paired: ["p-a", "p-b"] },
+    });
+    expect([...files.keys()].sort()).toEqual([
+      "README.md",
+      "fold_test_full_data_0.json",
+      "fold_test_job_request.json",
+      "fold_test_model_0.pdb",
+      "fold_test_summary_confidences_0.json",
+      "msas/fold_test_paired_msa_chains_a.a3m",
+      "msas/fold_test_paired_msa_chains_b.a3m",
+      "msas/fold_test_unpaired_msa_chains_a.a3m",
+      "msas/fold_test_unpaired_msa_chains_b.a3m",
+    ]);
+  });
+
+  // 🔴 FIVE MODELS FOLDED, FIVE STRUCTURES SAVED. "All 5" ranks every model's
+  // passes together and the page keeps ONE - which threw four structures away
+  // that the play bar was still showing, and left the saved one with nothing to
+  // be compared against. ColabFold writes one per model with the rank in the
+  // name; so does this now, ranked by the criterion the page itself used.
+  it("writes one structure per model when a sweep produced them", () => {
+    const files = buildFoldArchive({
+      stem: "fold_test", model: "AlphaFold 2 (monomer-3)", settings: { seed: 0 },
+      entities, prediction: prediction(),
+      perModel: [
+        { rank: 1, family: "monomer-3", number: "3", pdb: "PDB3", scores: { plddt: 3 } },
+        { rank: 2, family: "monomer", number: "1", pdb: "PDB1", scores: { plddt: 1 } },
+      ],
+    });
+    expect(files.get("fold_test_rank_001_model_3.pdb")).toBe("PDB3");
+    expect(files.get("fold_test_rank_002_model_1.pdb")).toBe("PDB1");
+    expect(files.has("fold_test_rank_001_model_3_scores.json")).toBe(true);
+    // ...and the winner is still where a reader of any other archive looks for
+    // it, so nothing that reads these files has to learn a second layout.
+    expect(files.has("fold_test_model_0.pdb")).toBe(true);
+  });
+
+  // ...and a single-model fold is byte for byte the archive it always was.
+  it("writes no per-model files when one model folded", () => {
+    const files = buildFoldArchive({
+      stem: "fold_test", model: "AlphaFold 2", settings: { seed: 0 },
+      entities, prediction: prediction(),
+    });
+    expect([...files.keys()].some((name) => name.includes("_rank_"))).toBe(false);
+  });
+
+  // 🔴 A COUNT, NOT REPEATED ENTRIES. expandEntities turns two copies into two
+  // chains because that is what the model is handed; the request that produced
+  // the job says `count: 2` on one entry, and a file listing the sequence twice
+  // describes a different job.
+  it("keeps copies as a count in the request", () => {
+    const request = JSON.parse(jobRequestJson({ name: "j", seed: 7, entities }));
+    expect(request[0].sequences).toHaveLength(2);
+    expect(request[0].sequences[0].proteinChain.count).toBe(2);
+    expect(request[0].sequences[0].proteinChain.useStructureTemplate).toBe(true);
+    expect(request[0].sequences[1].ligand.ligand).toBe("HEM");
+    expect(request[0].modelSeeds).toEqual(["7"]);
+    expect(request[0].dialect).toBe("alphafoldserver");
+  });
+
+  /**
+   * 🔴 A MODIFIED RESIDUE IS INPUT, AND THE REQUEST IS WHAT REPRODUCES A JOB.
+   * The request listed the parent sequence alone, so an archive for a
+   * phosphorylated fold handed a reader a job that folds something else -
+   * and silently, because SEP3 shows in the status line and nowhere in the
+   * file. Same rule as the templates line.
+   */
+  it("names a modified residue in the request", () => {
+    const request = JSON.parse(jobRequestJson({ name: "j", seed: 0, entities: [
+      { type: "protein", value: "ACSE", copies: 1,
+        modifications: [{ code: "sep", position: 3 }] },
+    ] }));
+    expect(request[0].sequences[0].proteinChain.modifications)
+      .toEqual([{ ptmType: "CCD_SEP", ptmPosition: 3 }]);
+  });
+
+  // ...and absent, not empty, on a chain that carries none: `modifications: []`
+  // is a claim that the chain was checked, which no fold before this made.
+  it("says nothing at all when a chain is unmodified", () => {
+    const request = JSON.parse(jobRequestJson({ name: "j", seed: 0, entities }));
+    expect("modifications" in request[0].sequences[0].proteinChain).toBe(false);
+  });
+
+  it("nests the contacts exactly as it nests the PAE", () => {
+    const data = JSON.parse(fullDataJson({
+      ...prediction(), tokenChainIds: ["A", "A", "B", "B"],
+      tokenResIds: [1, 2, 1, 2], confidence: prediction().confidence,
+    }));
+    expect(data.contact_probs).toHaveLength(4);
+    expect(data.contact_probs[0]).toEqual([1, 0.2, 0.2, 0.2]);
+    // ...and both rounded the way the server rounds, which is also what keeps
+    // a float32 0.2 from being written as 0.20000000298023224.
+    expect(data.pae[0]).toEqual([0.46, 1.46, 2.46, 3.46]);
+    expect(data.atom_plddts).toEqual([71, 72, 73, 74]);
+    expect(data.atom_chain_ids).toEqual(["A", "A", "B", "B"]);
+  });
+
+  // 🔴 AN UNSCORED INTERFACE IS null, NOT 0. Zero reads as "the model looked and
+  // was sure it is bad"; the pair map simply omits a pair it could not score.
+  //
+  // ...and the DIAGONAL is null here for a different reason, which the test
+  // below is the other half of: this fold carries no per-chain pTM, so there is
+  // nothing to put there. A fold that has one gets it, as the server does.
+  it("leaves the diagonal null when the fold has no per-chain pTM", () => {
+    const summary = JSON.parse(summaryConfidencesJson({
+      confidence: prediction().confidence, chainLengths: [2, 2],
+      tokenChainIds: ["A", "A", "B", "B"],
+    }));
+    expect(summary.chain_pair_iptm).toEqual([[null, 0.56], [0.56, null]]);
+    expect(summary.iptm).toBe(0.56);
+    expect(summary.ptm).toBe(0.81);
+    // One of four residues below pLDDT 50.
+    expect(summary.fraction_disordered).toBe(0.25);
+    // 🔴 A CLASH IS A CLAIM ABOUT GEOMETRY WE DO NOT MAKE. Every other field the
+    // server writes is computed here from what the model produced; `has_clash`
+    // would have to be invented, and a zero reads as "checked, and clean".
+    expect("has_clash" in summary).toBe(false);
+  });
+
+  // 🔴 THE DIAGONAL IS THE CHAIN AGAINST ITSELF, AND THE SERVER WRITES IT.
+  // tools/fixtures/fold_2026_09_01_10_17.zip has `chain_pair_iptm`
+  // [[0.9, 0.91], [0.91, 0.86]] beside `chain_ptm` [0.9, 0.86] - the diagonal
+  // is not an interface, it is that chain's own pTM, and it is not absent.
+  // This file read the same convention CORRECTLY one function down, for
+  // `chain_pair_pae_min`, and wrote null here.
+  //
+  // 🔴 AND A KEY-FOR-KEY COMPARISON CANNOT SEE THIS. docs/WEB.md's check
+  // against that archive was "nine of ten keys", which a wrong VALUE inside a
+  // key that is present passes untouched. The numbers below are the fixture's.
+  it("puts each chain's own pTM on the chain-pair diagonal, as the server does", () => {
+    const summary = JSON.parse(summaryConfidencesJson({
+      confidence: {
+        ...prediction().confidence,
+        chainPairIptm: { "1|2": 0.91 },
+        chainPtm: { 1: 0.9012, 2: 0.8567 },
+        chainIptm: { 1: 0.91, 2: 0.91 },
+      },
+      chainLengths: [2, 2], tokenChainIds: ["A", "A", "B", "B"],
+    }));
+    expect(summary.chain_pair_iptm).toEqual([[0.9, 0.91], [0.91, 0.86]]);
+    expect(summary.chain_ptm).toEqual([0.9, 0.86]);
+  });
+
+  // 🔴 A MINIMUM OVER ORDERED PAIRS, WHICH IS WHY IT IS NOT SYMMETRIC. The
+  // server's own file has [[0.76, 0.83], [0.82, 0.76]] - the diagonal is real
+  // and the two off-diagonal entries differ - so a symmetric matrix here would
+  // have been a plausible-looking wrong reading of the format.
+  it("takes the chain-pair PAE minimum over ordered pairs", () => {
+    const tokens = 4;
+    // Chain A is tokens 0-1, chain B is 2-3. Make A->B closer than B->A.
+    const pae = new Float32Array(tokens * tokens).fill(9);
+    for (let i = 0; i < tokens; i += 1) pae[i * tokens + i] = 0.5;
+    pae[0 * tokens + 2] = 1.25;
+    pae[2 * tokens + 0] = 3.75;
+    const summary = JSON.parse(summaryConfidencesJson({
+      confidence: { predictedAlignedError: pae },
+      chainLengths: [2, 2], tokenChainIds: ["A", "A", "B", "B"],
+    }));
+    expect(summary.chain_pair_pae_min).toEqual([[0.5, 1.25], [3.75, 0.5]]);
+  });
+
+  // 🔴 THE CASE THE TESTS ABOVE MISSED, AND A REAL FOLD DID NOT. AlphaFold 3
+  // numbers its chains from ONE, AlphaFold 2 from zero. Written against 0-based
+  // keys alone, every test here passed while a real two-chain AF3 fold produced
+  // `chain_pair_iptm: [[null, null], [null, null]]` and
+  // `chain_ptm: [null, 0.69]` - "1|2" matching nothing and "1" matching the
+  // second chain by accident, which is a summary that looks complete.
+  it("reads the score keys as asym ids, whichever base the model numbers from", () => {
+    const oneBased = JSON.parse(summaryConfidencesJson({
+      confidence: {
+        ...prediction().confidence,
+        chainPairIptm: { "1|2": 0.42 },
+        chainPtm: { 1: 0.9, 2: 0.7 },
+        chainIptm: { 1: 0.42, 2: 0.42 },
+      },
+      chainLengths: [2, 2], tokenChainIds: ["A", "A", "B", "B"],
+    }));
+    expect(oneBased.chain_pair_iptm).toEqual([[0.9, 0.42], [0.42, 0.7]]);
+    expect(oneBased.chain_ptm).toEqual([0.9, 0.7]);
+
+    const zeroBased = JSON.parse(summaryConfidencesJson({
+      confidence: {
+        ...prediction().confidence,
+        chainPairIptm: { "0|1": 0.42 },
+        chainPtm: { 0: 0.9, 1: 0.7 },
+        chainIptm: { 0: 0.42, 1: 0.42 },
+      },
+      chainLengths: [2, 2], tokenChainIds: ["A", "A", "B", "B"],
+    }));
+    expect(zeroBased.chain_pair_iptm).toEqual(oneBased.chain_pair_iptm);
+    expect(zeroBased.chain_ptm).toEqual(oneBased.chain_ptm);
+  });
+
+  it("writes each chain's own pTM and its ipTM against the rest", () => {
+    const summary = JSON.parse(summaryConfidencesJson({
+      confidence: {
+        ...prediction().confidence,
+        chainPtm: { 0: 0.9012, 1: 0.4011 },
+        chainIptm: { 0: 0.5567, 1: 0.5567 },
+      },
+      chainLengths: [2, 2], tokenChainIds: ["A", "A", "B", "B"],
+    }));
+    expect(summary.chain_ptm).toEqual([0.9, 0.4]);
+    expect(summary.chain_iptm).toEqual([0.56, 0.56]);
+  });
+
+  it("refuses to infer a token layout it cannot know", () => {
+    // A ligand makes AF3's token count exceed the residues, and numbering the
+    // extra tokens as polymer would put them on the last chain.
+    expect(() => tokenIdentifiers([2, 2], 9)).toThrow();
+    expect(tokenIdentifiers([2, 2], 9, {
+      chainIds: Array(9).fill("A"), resIds: Array(9).fill(1),
+    }).chainIds).toHaveLength(9);
+  });
+
+  // 🔴 A LIGAND IS A CHAIN THE SCORES COUNT AND `chainLengths` DOES NOT.
+  // `chainLengths` is the POLYMER chains - web/app.js builds it as
+  // `chains.map((chain) => chain.length)` - while the confidence scores are
+  // keyed by asym id, and AF3 gives a ligand its own. So a protein folded with
+  // GOL has one chain length and two asym ids, `asymOrder` finds the counts
+  // disagree, falls back to the plain index, and every per-chain lookup misses:
+  // the archive wrote `chain_ptm: [null]` for a fold whose own `chain_ids`
+  // names A and B, and never reported the protein-ligand contact at all.
+  // Measured on the page before this test existed, with `ptm` 0.43 and
+  // `mean_plddt` 72.61 correct beside it - the scalars are fine, which is why
+  // nothing looked wrong.
+  it("scores the chain a ligand added, which chainLengths does not count", () => {
+    const summary = JSON.parse(summaryConfidencesJson({
+      confidence: {
+        ...prediction().confidence,
+        chainPtm: { 1: 0.9012, 2: 0.4011 },
+        chainIptm: { 1: 0.5567, 2: 0.5567 },
+        chainPairIptm: { "1|2": 0.6012 },
+      },
+      // One polymer chain of two residues, plus two ligand tokens in chain B.
+      chainLengths: [2],
+      tokenChainIds: ["A", "A", "B", "B"],
+      tokenResIds: [1, 2, 1, 1],
+    }));
+    expect(summary.chain_ptm).toEqual([0.9, 0.4]);
+    expect(summary.chain_pair_iptm).toEqual([[0.9, 0.6], [0.6, 0.4]]);
+  });
+
+  it("refuses to name more chains than it can spell", () => {
+    expect(() => buildFoldArchive({
+      stem: "x", entities, prediction: prediction(Array(27).fill(1)),
+    })).toThrow();
+  });
+});
+
+describe("an archive from a model with no confidence head", () => {
+  // 🔴 THIS FOLD HAS NO `confidence` OBJECT, AND THAT IS THE HONEST SHAPE. The
+  // EF2-fast checkpoint ships zero confidence_head tensors, so the page stores
+  // no pLDDT, no PAE and no pTM rather than an object of zeros that would be
+  // read as the model's opinion. "Download all" then failed with "Cannot read
+  // properties of undefined (reading 'length')" - the token count was being
+  // recovered from the PAE's own size.
+  // ...ten residues, not four: the max-contact score excludes sequence
+  // neighbours, and a chain shorter than the separation has no pair to report.
+  const chainLengths = [10];
+  const lines = [];
+  for (let residue = 0; residue < 10; residue += 1) {
+    for (const [atom, name] of ["N", "CA", "C"].entries()) {
+      lines.push(`ATOM  ${String(residue * 3 + atom + 1).padStart(5)}  ${name.padEnd(3)}`
+        + ` ALA A${String(residue + 1).padStart(4)}    `
+        + `${"0.000".padStart(8)}${"0.000".padStart(8)}${"0.000".padStart(8)}`
+        + `  1.00 ${"61.20".padStart(5)}          ${name[0]}`);
+    }
+  }
+  const prediction = {
+    pdb: `${lines.join("\n")}\nEND\n`,
+    chainLengths,
+    // ...only what this model produces: a contact map off the trunk.
+    confidence: { contactProbs: Float32Array.from({ length: 100 }, () => 0.25) },
+  };
+  // ...no `templates` and no `msaOrigin`, which is how a caller says "this
+  // model has neither control" as opposed to "neither was used".
+  const build = () => buildFoldArchive({
+    stem: "fold_ef2", model: "EF2-fast", settings: { seed: 3 },
+    entities: [{ type: "protein", value: "AAAA", copies: 1 }], prediction,
+  });
+
+  it("builds at all, which is the bug", () => {
+    // ...called for its throw, which is what the report was: the archive read
+    // `confidence.predictedAlignedError.length` on a fold that has no PAE.
+    const files = build();
+    expect([...files.keys()]).toContain("fold_ef2_full_data_0.json");
+    expect([...files.keys()]).toContain("fold_ef2_model_0.pdb");
+  });
+
+  it("omits the fields there is no head to compute", () => {
+    const data = JSON.parse(build().get("fold_ef2_full_data_0.json"));
+    expect("pae" in data).toBe(false);
+    expect(data.contact_probs.length).toBe(10);
+    // ...and the summary holds the one score the trunk can give without a
+    // confidence head, rather than being a file whose entire content is
+    // `chain_ids` - one letter per token and nothing else.
+    const summary = JSON.parse(build().get("fold_ef2_summary_confidences_0.json"));
+    expect("ptm" in summary).toBe(false);
+    expect("fraction_disordered" in summary).toBe(false);
+    expect(summary.chain_pair_max_contact).toEqual([[0.25]]);
+  });
+
+  it("reports no pair rather than a zero when the chain is too short", () => {
+    // 🔴 A CHAIN SHORTER THAN THE SEPARATION HAS NOTHING TO MEASURE, and 0.00
+    // there would read as "the model is sure this does not fold", which is a
+    // claim. Same rule as the certainty's own empty-filter fallback.
+    const short = { ...prediction, chainLengths: [4] };
+    const files = buildFoldArchive({
+      stem: "fold_short", model: "EF2-fast", settings: {},
+      entities: [{ type: "protein", value: "AAAA", copies: 1 }],
+      prediction: {
+        ...short,
+        pdb: `${lines.slice(0, 12).join("\n")}\nEND\n`,
+        confidence: { contactProbs: Float32Array.from({ length: 16 }, () => 0.25) },
+      },
+    });
+    const summary = JSON.parse(files.get("fold_short_summary_confidences_0.json"));
+    expect(summary.chain_pair_max_contact).toEqual([[null]]);
+  });
+
+  it("does not describe controls this model has no use for", () => {
+    // 🔴 `msaOrigin` UNDEFINED MEANS "THIS MODEL DOES NOT TAKE ONE", and it is
+    // what drops both the alignment line and the paragraph describing a `msas/`
+    // directory the archive does not contain. Saying "alignment: none (single
+    // sequence)" reads as a choice that was made.
+    const text = build().get("README.md");
+    expect(text.includes("- alignment:")).toBe(false);
+    expect(text.includes("`msas/` holds")).toBe(false);
+    expect(text).toContain("folds from the sequence alone");
+    // ...and it says why the scores are missing, since a missing summary file
+    // and a B-factor that is not a pLDDT are each surprising on their own.
+    expect(text).toContain("no confidence head");
+    expect(text).toContain("chain_pair_max_contact");
+    // ...and no template line either: this model cannot take one, so "none"
+    // would report a choice where there is no control.
+    expect(text.includes("- templates:")).toBe(false);
+  });
+
+  it("does not call the B-factor a pLDDT when it is not one", () => {
+    // 🔴 THE COLUMN CARRIES THE DISTOGRAM CERTAINTY HERE, under a REMARK naming
+    // it, and the page is careful that the word pLDDT appears nowhere for this
+    // model. A key called `atom_plddts` would undo that in the one file a
+    // reader is most likely to parse.
+    const data = JSON.parse(build().get("fold_ef2_full_data_0.json"));
+    expect("atom_plddts" in data).toBe(false);
+    expect(data.atom_certainty.length).toBe(30);
+  });
+});
+
+describe("the alignment round trip", () => {
+  // Two chains whose paired and unpaired blocks are DIFFERENT, which is the
+  // only way the test can tell them apart on the way back.
+  const chains = ["ACDEFG", "MKVLAA"];
+  const unpaired = [
+    ">query\nACDEFG\n>u1\nACDEFA\n>u2\nACDEFC\n",
+    ">query\nMKVLAA\n>u3\nMKVLAC\n",
+  ];
+  const paired = new Map([
+    [chains[0], ">query\nACDEFG\n>p1 OX=9\nACDEFF\n"],
+    [chains[1], ">query\nMKVLAA\n>p1 OX=9\nMKVLAF\n"],
+  ]);
+
+  it("comes back out of the archive as the same blocks that went in", async () => {
+    const files = buildFoldArchive({
+      stem: "fold_rt", model: "AlphaFold 3", settings: { seed: 1 },
+      entities: chains.map((value) => ({ type: "protein", value, copies: 1 })),
+      prediction: prediction([6, 6]),
+      msas: { unpaired, paired: chains.map((chain) => paired.get(chain)) },
+    });
+    const restored = msasFromArchive(await readZip(await writeZip(files)));
+    expect(restored.chainA3ms).toEqual(unpaired);
+    expect(restored.pairedA3ms.get(0)).toBe(paired.get(chains[0]));
+    expect(restored.pairedA3ms.get(1)).toBe(paired.get(chains[1]));
+  });
+
+  // 🔴 THE ASSERTION THE WHOLE FEATURE EXISTS FOR. Before this, an uploaded
+  // alignment was recorded as unpaired in its entirety - AlphaFold 3 reads the
+  // paired block first and takes its profile over the unpaired one alone, so a
+  // fold restored from its own download was silently a different fold. Merging
+  // the restored per-chain files through the SAME function the search path uses
+  // is what makes the two routes agree by construction rather than by promise.
+  it("merges back to the blocks the search itself would have produced", async () => {
+    const fromSearch = mergeSearchedChains({
+      sequences: chains, chainA3ms: unpaired, pairedA3ms: paired, model: "af3",
+    });
+    const files = buildFoldArchive({
+      stem: "fold_rt", model: "AlphaFold 3", settings: { seed: 1 },
+      entities: chains.map((value) => ({ type: "protein", value, copies: 1 })),
+      prediction: prediction([6, 6]),
+      msas: { unpaired, paired: chains.map((chain) => paired.get(chain)) },
+    });
+    const restored = msasFromArchive(await readZip(await writeZip(files)));
+    const fromArchive = mergeSearchedChains({
+      sequences: chains,
+      chainA3ms: restored.chainA3ms,
+      pairedA3ms: new Map(chains.map((chain, index) =>
+        [chain, restored.pairedA3ms.get(index)])),
+      model: "af3",
+    });
+    expect(fromArchive.blocks.paired).toBe(fromSearch.blocks.paired);
+    expect(fromArchive.blocks.unpaired).toBe(fromSearch.blocks.unpaired);
+    expect(fromArchive.a3m).toBe(fromSearch.a3m);
+    // ...and the paired block is genuinely present, or the comparison above
+    // would be two identical nothings.
+    expect(fromSearch.blocks.paired).toContain("ACDEFF");
+  });
+});
+
+describe("where a fold's contact map lives", () => {
+  // 🔴 ONE FIELD, THREE MODELS, AND IT WAS THREE FIELDS. AF3 handed the map
+  // back with its confidence, AF2 filled it in later off the saved pass, and
+  // EF2-fast - which has no confidence object at all, having no confidence head
+  // - kept it beside the prediction. The archive read two of the three, so the
+  // model whose contact map is its ONLY score wrote an archive without one
+  // while the panel on screen showed it. This is the guard on the unification,
+  // because nothing else would notice a fourth path arriving with a fourth
+  // convention.
+  const app = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
+
+  // 🔴 ANCHORED ON THE BUILDER, NOT ON THE BUTTON. This used to slice from
+  // `element("download-all")` to `downloadBlob`, which held the whole
+  // `buildFoldArchive` call until the saved session needed the same archive
+  // without its alignment and the call moved into `archiveFor`. The guard is
+  // about where the contact map is READ, and that is the builder wherever it
+  // sits: pinned to the handler, a refactor that KEPT the property still
+  // failed, and a later one that moved the read elsewhere would pass.
+  it("is read from exactly one field when the archive is built", () => {
+    const builder = app.slice(app.indexOf("function archiveFor("));
+    const call = builder.slice(0, builder.indexOf("\n}"));
+    expect(call).toContain("pred.contactSource?.contactProbs");
+    // ...and not from the two places it used to also look.
+    expect(call.includes("pred.contacts")).toBe(false);
+    expect(call.includes("pred.confidence?.contactProbs")).toBe(false);
+  });
+
+  it("is set by every path that stores a prediction", () => {
+    // Each prediction literal, to its closing brace - at whatever indent,
+    // since AF2's sits one scope deeper than AF3's and a pattern pinned to
+    // two spaces silently checks two of the three paths.
+    //
+    // 🔴 THE THREE GO THROUGH ONE FUNNEL NOW, and this is anchored on it.
+    // They used to be three `lastPrediction = {` assignments, of which
+    // ESMFold2's did only that - no `predictions.set`, no downloads sync -
+    // so the page's download row went on describing the fold before it.
+    // `recordPrediction` is the one door; a path that does not go through it
+    // is not counted here, which is the point.
+    const blocks = [...app.matchAll(/recordPrediction\(\{\n([\s\S]*?)\n\s*\}, /g)];
+    // ...four now: AlphaFold 2's, AlphaFold 3's, ESMFold2's and BioEmu2's
+    expect(blocks.length).toBe(4);
+    for (const [, body] of blocks) {
+      expect(body).toContain("contactSource");
+    }
+  });
+});
+
+/**
+ * 🔴 ONE NAME FOR THE FOLD, AND IT USED TO BE TWO. AlphaFold 3's example files
+ * carry a `name` and this archive wrote the fold's stem over it, so
+ * `calmodulin_4calcium.json` came back out of the page called `af3_1`. The
+ * first fix passed a `jobName` beside the stem, which was half of one: the
+ * viewer object, the .pdb button and every member here still said `af3_1`
+ * while one field of one file said otherwise. `foldStem` in web/app.js now
+ * resolves a single name - the page's name box, then a pasted FASTA header,
+ * then the model - and hands it down as `stem`, so what this file has to
+ * guarantee is only that the request agrees with the members.
+ */
+describe("the request's name", () => {
+  const entities = [{ type: "protein", value: "ACDEFGHIK", copies: 1,
+                      modifications: [] }];
+  const archive = (stem) => buildFoldArchive({
+    stem, model: "AlphaFold 3", settings: { seed: 7 }, entities,
+    prediction: prediction(),
+  });
+
+  it("is the stem, so the request and the files cannot disagree", () => {
+    for (const stem of ["af3_1", "calmodulin_4calcium"]) {
+      const files = archive(stem);
+      const request = JSON.parse(files.get(`${stem}_job_request.json`))[0];
+      expect(request.name).toBe(stem);
+      expect(files.has(`${stem}_model_0.pdb`)).toBe(true);
+    }
+  });
+
+  /**
+   * 🔴 AND THE SANITISING HAPPENS BEFORE THIS FILE SEES IT. `buildFoldArchive`
+   * runs `safeJobName` over the stem for the MEMBER names and writes the stem
+   * itself into the request, so an unsafe stem would put a different string in
+   * each - which cannot arise, because `foldStem` sanitises on the way out and
+   * `safeJobName` is idempotent. Pinned rather than argued: a stem that has
+   * been through it once comes out of both sides the same.
+   */
+  it("needs no second sanitising pass", () => {
+    const stem = safeJobName("my fold/2024");
+    const files = archive(stem);
+    const request = JSON.parse(files.get(`${stem}_job_request.json`))[0];
+    expect(request.name).toBe(stem);
+    expect(safeJobName(stem)).toBe(stem);
+  });
+});

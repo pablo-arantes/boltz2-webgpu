@@ -1,0 +1,258 @@
+import { describe, expect, it } from "./harness.js";
+import {
+  chainIdentity, deduplicateUnpairedAgainstPaired,
+  mergeChainA3ms, mergeJobAlignments, mergeRowAlignedChainA3ms, mergeUnpairedChainA3ms, pairA3msBySpecies,
+  uniprotSpecies,
+  residueIndexWithChainBreaks,
+  splitComplexA3mByChain,
+  validatedChainLengths,
+} from "../shared/input/chains.js";
+import { parseA3m } from "../shared/input/a3m.js";
+
+describe("monomer-model oligomer preprocessing", () => {
+  it("adds ColabFold's 200-index offset at every physical chain boundary", () => {
+    expect(Array.from(residueIndexWithChainBreaks(7, [3, 2, 2])))
+      .toEqual([0, 1, 2, 203, 204, 405, 406]);
+  });
+
+  it("validates that chain lengths are a positive partition of the query", () => {
+    expect(validatedChainLengths(5, undefined)).toEqual([5]);
+    expect(() => validatedChainLengths(5, [2, 2])).toThrow(/sum to 4; expected 5/);
+    expect(() => validatedChainLengths(5, [5, 0])).toThrow(/positive integers/);
+  });
+
+  it("builds an unpaired heterooligomer MSA without losing insertions", () => {
+    const merged = mergeUnpairedChainA3ms([
+      ">a\nACD\n>a_hit\nAcCD\n",
+      ">b\nWY\n>b_hit\nW-\n",
+    ]);
+    const parsed = parseA3m(merged);
+    expect(parsed.query).toBe("ACDWY");
+    // (each chain's own query row too, as ColabFold pads it: a single-sequence complex folds on those)
+    expect(parsed.sequences).toEqual(["ACDWY", "ACD--", "ACD--", "---WY", "---W-"]);
+    expect(parsed.deletionMatrix[2]).toEqual([0, 1, 0, 0, 0]);
+  });
+
+  it("expands one alignment independently into both homooligomer copies", () => {
+    const chain = ">a\nAC\n>hit\nA-\n";
+    const parsed = parseA3m(mergeUnpairedChainA3ms([chain, chain]));
+    expect(parsed.query).toBe("ACAC");
+    expect(parsed.sequences).toEqual(["ACAC", "AC--", "A---", "--AC", "--A-"]);
+  });
+
+  it("projects the complex MSA into queries py2Dmol can match to PDB chains", () => {
+    const complex = ">query\nACDWY\n>a\nAC---\n>b\n---WY\n>paired\nAC-WY\n";
+    const projected = splitComplexA3mByChain(complex, [3, 2]).map(parseA3m);
+    expect(projected.map((alignment) => alignment.query)).toEqual(["ACD", "WY"]);
+    expect(projected[0].sequences).toEqual(["ACD", "AC-", "AC-"]);
+    expect(projected[1].sequences).toEqual(["WY", "WY", "WY"]);
+  });
+});
+
+describe("pairing repeated chains", () => {
+  const chainA = ">q\nAAAA\n>h1\nCCCC\n>h2\nDDDD\n";
+  const chainB = ">q\nMM\n>k1\nWW\n";
+
+  it("pairs a homodimer into one row per homolog instead of two", () => {
+    const paired = parseA3m(mergeChainA3ms([chainA, chainA]));
+    const diagonal = parseA3m(mergeUnpairedChainA3ms([chainA, chainA]));
+    expect(paired.length).toBe(8);
+    expect(diagonal.length).toBe(8);
+    // ...the whole point: half the rows, and each one covers both copies.
+    expect(paired.depth).toBe(3);
+    expect(diagonal.depth).toBe(7);
+    expect(paired.sequences[1]).toBe("CCCCCCCC");
+    expect(paired.sequences[2]).toBe("DDDDDDDD");
+  });
+
+  it("keeps the query row intact", () => {
+    const paired = parseA3m(mergeChainA3ms([chainA, chainA]));
+    expect(paired.query).toBe("AAAAAAAA");
+  });
+
+  it("pairs the repeated chains of an A2B complex and block-diagonals B", () => {
+    const paired = parseA3m(mergeChainA3ms([chainA, chainA, chainB]));
+    expect(paired.query).toBe("AAAAAAAAMM");
+    expect(paired.depth).toBe(4);
+    expect(paired.sequences[1]).toBe("CCCCCCCC--");
+    expect(paired.sequences[2]).toBe("DDDDDDDD--");
+    expect(paired.sequences[3]).toBe("--------WW");
+  });
+
+  it("never pairs distinct proteins, which would invent coevolution", () => {
+    const paired = parseA3m(mergeChainA3ms([chainA, chainB]));
+    expect(paired.depth).toBe(4);
+    for (let row = 1; row < paired.depth; row += 1) {
+      const left = /[^-]/.test(paired.sequences[row].slice(0, 4));
+      const right = /[^-]/.test(paired.sequences[row].slice(4));
+      expect(left && right).toBe(false);
+    }
+  });
+
+  it("leaves a single chain exactly as the unpaired form does", () => {
+    expect(mergeChainA3ms([chainA])).toBe(mergeUnpairedChainA3ms([chainA]));
+  });
+
+  it("still splits back into one viewer alignment per chain", () => {
+    const a3m = mergeChainA3ms([chainA, chainA]);
+    const [first, second] = splitComplexA3mByChain(a3m, [4, 4]);
+    expect(parseA3m(first).depth).toBe(3);
+    expect(parseA3m(second).depth).toBe(3);
+  });
+});
+
+describe("multimer chain identity", () => {
+  const show = (values) => Array.from(values).join("");
+
+  it("is all zeros for a monomer, which is what one chain means", () => {
+    const { asymId, entityId, symId } = chainIdentity(4, undefined);
+    expect(show(asymId)).toBe("0000");
+    expect(show(entityId)).toBe("0000");
+    expect(show(symId)).toBe("0000");
+  });
+
+  it("gives a homodimer two chains, one entity and two copies", () => {
+    const { asymId, entityId, symId } = chainIdentity(6, [3, 3], ["AAA", "AAA"]);
+    expect(show(asymId)).toBe("000111");
+    expect(show(entityId)).toBe("000000");
+    expect(show(symId)).toBe("000111");
+  });
+
+  it("gives a heterodimer two entities, each its own first copy", () => {
+    const { asymId, entityId, symId } = chainIdentity(6, [3, 3], ["AAA", "BBB"]);
+    expect(show(asymId)).toBe("000111");
+    expect(show(entityId)).toBe("000111");
+    expect(show(symId)).toBe("000000");
+  });
+
+  it("counts copies within each entity separately for A2B2", () => {
+    const { asymId, entityId, symId } = chainIdentity(8, [2, 2, 2, 2], ["AA", "AA", "BB", "BB"]);
+    expect(show(asymId)).toBe("00112233");
+    expect(show(entityId)).toBe("00001111");
+    expect(show(symId)).toBe("00110011");
+  });
+
+  it("treats every chain as its own entity when no sequences are given", () => {
+    const { entityId, symId } = chainIdentity(4, [2, 2]);
+    expect(show(entityId)).toBe("0011");
+    expect(show(symId)).toBe("0000");
+  });
+
+  it("refuses a sequence list that does not match the chains", () => {
+    expect(() => chainIdentity(6, [3, 3], ["AAA"])).toThrow(/one sequence per chain/);
+  });
+
+  it("refuses chain lengths that do not partition the sequence", () => {
+    expect(() => chainIdentity(6, [3, 4])).toThrow(/sum to 7/);
+  });
+});
+
+describe("deduplicating the unpaired block against the paired one", () => {
+  // AlphaFold does this per chain before any merge, in
+  // msa_pairing.deduplicate_unpaired_sequences. Both blocks are drawn from the
+  // same databases, so for a target with good pairing most of the unpaired
+  // block is the paired block again - and the two share one row budget, so a
+  // duplicate evicts a sequence that carried something.
+  const paired = ">query\nACDE\n>sp1\nAC-E\n";
+
+  it("drops unpaired rows the paired block already has", () => {
+    const kept = deduplicateUnpairedAgainstPaired(
+      ">query\nACDE\n>u1\nAC-E\n>u2\nACD-\n", paired);
+    expect(parseA3m(kept).sequences).toEqual(["ACDE", "ACD-"]);
+  });
+
+  it("compares the aligned columns, not the raw row", () => {
+    // 🔴 AF3 hashes the FEATURISED row, and featurisation has already moved the
+    // lowercase insertions into the deletion matrix - so two rows differing
+    // only in their insertions are one row here. Comparing the A3M text keeps
+    // duplicates AlphaFold removes.
+    const kept = deduplicateUnpairedAgainstPaired(">query\nACDE\n>u1\nACw-E\n", paired);
+    expect(parseA3m(kept).depth).toBe(1);
+  });
+
+  it("keeps the query row, because an A3M without one is not an A3M", () => {
+    // 🔴 A REPRESENTATION DETAIL, NOT A DISAGREEMENT WITH AF3. AF3 dedups
+    // arrays and drops the unpaired query, since the paired block already opens
+    // with it; parseA3m rejects a block whose first row is not an ungapped
+    // query. So it stays here and af3MsaFromA3m skips it when there is a paired
+    // block, which lands the same rows in the same order.
+    const kept = deduplicateUnpairedAgainstPaired(">query\nACDE\n>u1\nACD-\n", paired);
+    expect(parseA3m(kept).sequences).toEqual(["ACDE", "ACD-"]);
+  });
+
+  it("is the identity when there is no paired block", () => {
+    // A homomer and the AF2 monomer never pair, and must be left exactly alone.
+    const unpaired = ">query\nACDE\n>u1\nAC-E\n";
+    expect(deduplicateUnpairedAgainstPaired(unpaired, null)).toBe(unpaired);
+    expect(deduplicateUnpairedAgainstPaired(unpaired, undefined)).toBe(unpaired);
+  });
+});
+
+/**
+ * A CHAIN WITH ITS ALIGNMENT TURNED OFF IS A QUERY-ONLY BLOCK, and this is
+ * why that representation was chosen over anything the merge would have had
+ * to learn: it already pads a short chain with gaps, so the result is the
+ * real sequence on row 0 and gaps under it - which is what AlphaFold reads as
+ * "no alignment for this chain". Nothing in the merge knows the feature
+ * exists.
+ *
+ * The fold path builds these blocks (web/app.js, where the searched chains
+ * are expanded back to the fold's own order); what is pinned here is the
+ * property it relies on.
+ */
+describe("a chain folded from its query alone, beside one that is aligned", () => {
+  const rowsOf = (text) => text.trim().split("\n").filter((_, i) => i % 2 === 1);
+
+  it("keeps its own sequence on the query row and gaps below it", () => {
+    const aligned = ">101\nGWSTELEK\n>h1\nGWSTELEA\n>h2\nGWSTELEC\n";
+    const queryOnly = ">101\nPIAQIHIL\n";
+    const rows = rowsOf(mergeRowAlignedChainA3ms([aligned, queryOnly]));
+    expect(rows).toEqual([
+      "GWSTELEKPIAQIHIL",
+      "GWSTELEA--------",
+      "GWSTELEC--------",
+    ]);
+  });
+
+  it("is the whole alignment when every chain is turned off", () => {
+    const rows = rowsOf(mergeRowAlignedChainA3ms([">101\nGWST\n", ">101\nPIAQ\n"]));
+    expect(rows).toEqual(["GWSTPIAQ"]);
+  });
+});
+
+describe("a job's pairedMsa from AF3's own pipeline", () => {
+  const rowsOf = (text) => text.trim().split("\n").filter((_, i) => i % 2 === 1);
+  const A = ">query\nPREACHINGS\n>tr|Q1|Q1_MOUSE/2-9\nPREBCHINGS\n>sp|P2|X_HUMAN\n--EACHINGS\n"
+    + ">sp|P3-2|Y_HUMAN\nPREACHINGZ\n>tr|Q4|Q4_YEAST\nPRUACHINGS\n>tr|Q5|Q5_HUMAN\nPREACHIJGS\n";
+  const B = ">query\nLITERALLY\n>tr|R1|R1_HUMAN\nLITERALLB\n>tr|R2|R2_YEAST\nLITER-LLY\n>tr|R3|R3_HUMAN\nLITEaRALLY\n";
+  const C = ">query\nMKTAYIAK\n>tr|S1|S1_MOUSE\nMKTAYZAK\n>tr|S2|S2_HUMAN\nMKTAY-AK\n";
+
+  it("reads a species as AF3's ExtractSpeciesIds does", () => {
+    expect(["sp|P0C2L1|A3X1_LOXLA", "tr|A0A146SKV9|A0A146SKV9_FUNHE/3-40 desc", "sp|O88974-2|SETB1_MOUSE",
+      "UniRef100_A0A0B4", "query"].map(uniprotSpecies)).toEqual(["LOXLA", "FUNHE", "", "", ""]);
+  });
+
+  it("pairs by species, not by row - AF3's create_paired_features (checked against it, stable sorts)", () => {
+    // HUMAN is in all three chains (one hit in C, so one row), then the two-chain species MOUSE (A, C) and YEAST
+    // (A, B) ordered by the product of their row indices; A's isoform names no species and is left out
+    expect(rowsOf(pairA3msBySpecies([A, B, C]))).toEqual([
+      "PREACHINGSLITERALLYMKTAYIAK",
+      "--EACHINGSLITERALLDMKTAY-AK",
+      "PREDCHINGS---------MKTAYEAK",
+      "PRCACHINGSLITER-LLY--------",
+    ]);
+  });
+
+  it("merges ColabFold's species-less pairedMsa row by row, as before", () => {
+    const pa = ">query\nGWST\n>UniRef100_X\nGWSA\n", pb = ">query\nPIAQ\n>UniRef100_Y\nPIAC\n";
+    expect(pairA3msBySpecies([pa, pb])).toEqual(null);
+    const merged = mergeJobAlignments({ unpaired: [null, null], paired: [pa, pb] }, ["GWST", "PIAQ"], ["protein", "protein"]);
+    expect(rowsOf(merged.alignment.paired)).toEqual(["GWSTPIAQ", "GWSAPIAC"]);
+  });
+
+  it("is the path a job's alignments take", () => {
+    const merged = mergeJobAlignments({ unpaired: [null, null, null], paired: [A, B, C] },
+      ["PREACHINGS", "LITERALLY", "MKTAYIAK"], ["protein", "protein", "protein"]);
+    expect(rowsOf(merged.alignment.paired).length).toEqual(4);
+  });
+});

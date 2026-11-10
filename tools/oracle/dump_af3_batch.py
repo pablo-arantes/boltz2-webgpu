@@ -1,0 +1,270 @@
+"""Dump a model's FEATURISED BATCH, so tools/gpu/fold.js can fold that model.
+
+    cd ~/alphafold3 && PYTHONPATH=src:.:dev/oracles \
+      python dump_af3_batch.py protenix2 --sequence <SEQ>
+
+🔴 WHY A SECOND MODEL NEEDS ITS OWN. `fold.js` reads oracle-dumps/af3-6mrr.json
+and its banner says "featurised by AF3, read from the dump" - which is exactly
+right and exactly the problem: featurisation is PER MODEL. Feeding protenix2
+AlphaFold 3's target_feat reads relRMS 9.78e-1 against its own, and the fold
+then runs every stage correctly on the wrong input and returns a structure whose
+consecutive CA is 8.3 A against 3.8 expected. Every stage was right; the input
+was another model's.
+
+af3-any-model's `_fold_setup(model, seq)` applies each model's own conventions -
+the restype alphabet, the empty-template restype, the element index shift - so
+this asks it rather than reimplementing any of them.
+"""
+import argparse
+import json
+import os
+import sys
+
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
+REFERENCE = os.path.expanduser(os.environ.get("LOCALFOLD_AF3_REFERENCE", "~/alphafold3"))
+SEQUENCE = "GSMKQIEDKIEE"
+
+# 🔴 EVERY ARRAY LEAF, NOT A LIST OF NAMES. A hand-written key list missed the
+# five atom-layout GATHERS and a dozen token flags, and `fold.js` then died on
+# `Cannot read properties of undefined` rather than saying which feature was
+# absent. The AF3 dump this stands beside carries 59 inputs; walking the batch
+# the way dump_af3_trunk.py does reproduces that set exactly, including the
+# `<name>:gather_idxs` / `:gather_mask` / `:input_shape` spelling a GatherInfo
+# flattens to.
+
+
+def arrays(obj, prefix=""):
+    """(name, value) for every array leaf of a nested batch."""
+    if isinstance(obj, dict):
+        for key in sorted(obj):
+            yield from arrays(obj[key], f"{prefix}/{key}" if prefix else key)
+    elif isinstance(obj, (list, tuple)):
+        for index, value in enumerate(obj):
+            yield from arrays(value, f"{prefix}[{index}]")
+    elif hasattr(obj, "shape") and hasattr(obj, "dtype"):
+        yield prefix, obj
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("model", nargs="?", default="protenix2")
+    parser.add_argument("--sequence", default=SEQUENCE)
+    parser.add_argument("--reference", default=REFERENCE)
+    parser.add_argument("--out", default=None)
+    # 🔴 THE CONVENTIONS A PLAIN PROTEIN CANNOT EXERCISE. 6MRR has no
+    # ligand and no modified residue, so `symmetriseBonds`,
+    # `atomized_element_names`, `atomized_backbone_bonds` and
+    # `atomized_unknown_restype` are all inert on it - and a featuriser gate
+    # built on that target reports them green by never reaching them.
+    # `--ligand GOL` adds a ligand chain and `--ptm SEP@3` a modified residue,
+    # both through `_fold_setup(chains=...)`, so every per-model convention
+    # still comes from the reference rather than from this script.
+    parser.add_argument("--ligand", default=None,
+                        help="CCD code of a ligand chain to add, e.g. GOL; several, comma-separated, "
+                             "are ONE chain of bonded components (a glycan: NAG,NAG,BMA,MAN,MAN)")
+    parser.add_argument("--bonds", default=None,
+                        help="bondedAtomPairs as CHAIN:RESIDUE:ATOM-CHAIN:RESIDUE:ATOM;... "
+                             "(1-based residues, as AF3's job file writes them)")
+    parser.add_argument("--ptm", default=None,
+                        help="modified residue as CODE@POSITION, e.g. SEP@3 (1-based)")
+    # a nucleic chain and its modified bases: `--kind dna --mods 5CM@5,5CM@9`
+    parser.add_argument("--kind", default="protein", choices=["protein", "dna", "rna"])
+    # several polymer chains, each with its own unpaired alignment (A3M file, or "" for none):
+    # KIND:SEQUENCE[:A3M],KIND:SEQUENCE[:A3M],... - replaces --sequence/--kind
+    parser.add_argument("--chains", default=None)
+    parser.add_argument("--mods", default=None,
+                        help="modified bases or residues as CODE@POSITION[,...] (1-based)")
+    # components the installed dictionary lacks (af3-any-model's pip install carries a minimal one,
+    # without SEP or any modified base), as mmCIF text - what AF3's userCCD field takes
+    # an AlphaFold 3 job file, featurised as AF3 reads it (folding_input.Input.from_json): its chains,
+    # their inline alignments and templates, its bonds and its first seed - replaces every chain flag
+    parser.add_argument("--job", default=None)
+    # fold_check featurises with has_msa=False, so a model that zeroes a missing alignment (chai1's _zero_msa) zeroes
+    # one that is there; --has-msa featurises as run_alphafold.py does with an alignment (chai1's _chai_msa)
+    parser.add_argument("--has-msa", action="store_true")
+    parser.add_argument("--user-ccd", default=None, action="append",
+                        help="a component's CCD mmCIF file to add to the dictionary (repeatable)")
+    arguments = parser.parse_args()
+    for entry in (os.path.join(arguments.reference, "src"), arguments.reference,
+                  os.path.join(arguments.reference, "dev", "oracles")):
+        if entry not in sys.path:
+            sys.path.insert(0, entry)
+
+    import numpy as np
+    if arguments.user_ccd:
+        import functools
+        from alphafold3.constants import decoded_ccd
+        text = "\n".join(open(path).read() for path in arguments.user_ccd)
+        decoded_ccd.get_ccd = functools.partial(decoded_ccd.get_ccd, user_ccd=text)
+    # run_alphafold.py passes --max_template_date (2021-09-30) as ref_max_modified_date; the harness
+    # passes nothing, and a component whose ideal coordinates are "?" (TAC) then crashes comparing a
+    # date with None - so AF3's default is supplied
+    import datetime
+    from alphafold3.model import features as _features
+    _positions = _features._get_reference_positions_from_ccd_cif
+    def _with_cutoff(ccd_cif, ref_max_modified_date, logging_name):
+        return _positions(ccd_cif=ccd_cif, logging_name=logging_name,
+                          ref_max_modified_date=ref_max_modified_date or datetime.date(2021, 9, 30))
+    _features._get_reference_positions_from_ccd_cif = _with_cutoff
+    from fold_check import _fold_setup
+    from alphafold3.model import feat_batch
+
+    chains = None
+    job_bonds, job_seed = None, 0
+    if arguments.job is not None:
+        from alphafold3.common import folding_input
+        fold_input = folding_input.Input.from_json(open(arguments.job).read())
+        # a field the file leaves out is "search for it" to AF3's data pipeline, which this does not
+        # run; the page and the native fold read it as none, so it is given as none here too
+        def filled(chain):
+            if isinstance(chain, folding_input.ProteinChain):
+                return folding_input.ProteinChain(
+                    id=chain.id, sequence=chain.sequence, ptms=chain.ptms,
+                    paired_msa=chain.paired_msa if chain.paired_msa is not None else "",
+                    unpaired_msa=chain.unpaired_msa if chain.unpaired_msa is not None else "",
+                    templates=chain.templates if chain.templates is not None else [])
+            if isinstance(chain, folding_input.RnaChain) and chain.unpaired_msa is None:
+                return folding_input.RnaChain(id=chain.id, sequence=chain.sequence,
+                                              modifications=chain.modifications, unpaired_msa="")
+            return chain
+        chains = [filled(chain) for chain in fold_input.chains]
+        job_bonds = fold_input.bonded_atom_pairs
+        job_seed = fold_input.rng_seeds[0]
+        arguments.sequence = ":".join(getattr(c, "sequence", "") for c in chains if hasattr(c, "sequence"))
+    elif arguments.chains is not None:
+        from alphafold3.common import folding_input
+        chains = []
+        for k, spec in enumerate(arguments.chains.split(",")):
+            kind, seq, *rest = spec.split(":")
+            msa = open(rest[0]).read() if rest and rest[0] else None
+            cid = chr(ord("A") + k)
+            if kind == "protein":
+                chains.append(folding_input.ProteinChain(id=cid, sequence=seq, ptms=[],
+                    unpaired_msa=msa if msa is not None else "", paired_msa="", templates=[]))
+            elif kind == "rna":
+                chains.append(folding_input.RnaChain(id=cid, sequence=seq, modifications=[],
+                    unpaired_msa=msa if msa is not None else ""))
+            else:
+                chains.append(folding_input.DnaChain(id=cid, sequence=seq, modifications=[]))
+        arguments.sequence = ":".join(spec.split(":")[1] for spec in arguments.chains.split(","))
+    elif arguments.kind != "protein" or arguments.mods is not None:
+        from alphafold3.common import folding_input
+        mods = []
+        for spec in (arguments.mods or "").split(","):
+            if spec:
+                code, _, position = spec.partition("@")
+                mods.append((code.strip().upper(), int(position)))
+        if arguments.kind == "protein":
+            chain = folding_input.ProteinChain(id="A", sequence=arguments.sequence, ptms=mods,
+                                               unpaired_msa="", paired_msa="", templates=[])
+        elif arguments.kind == "dna":
+            chain = folding_input.DnaChain(id="A", sequence=arguments.sequence, modifications=mods)
+        else:
+            chain = folding_input.RnaChain(id="A", sequence=arguments.sequence, modifications=mods,
+                                           unpaired_msa="")
+        chains = [chain]
+        if arguments.ligand is not None:
+            chains.append(folding_input.Ligand(id="B", ccd_ids=[c.strip().upper() for c in arguments.ligand.split(",")]))
+    elif arguments.ligand is not None or arguments.ptm is not None:
+        from alphafold3.common import folding_input
+        # `ptms` is a sequence of (CODE, 1-based position) tuples and a ligand
+        # is `folding_input.Ligand`, not a "LigandChain" - checked against the
+        # reference's own signatures rather than guessed.
+        ptms = []
+        if arguments.ptm is not None:
+            code, _, position = arguments.ptm.partition("@")
+            ptms = [(code.strip().upper(), int(position))]
+        chains = [folding_input.ProteinChain(
+            id="A", sequence=arguments.sequence, ptms=ptms,
+            unpaired_msa="", paired_msa="", templates=[])]
+        if arguments.ligand is not None:
+            chains.append(folding_input.Ligand(
+                id="B", ccd_ids=[c.strip().upper() for c in arguments.ligand.split(",")]))
+    bonds = None
+    if arguments.bonds:
+        bonds = []
+        for pair in arguments.bonds.split(";"):
+            ends = []
+            for end in pair.split("-"):
+                chain, residue, atom = end.split(":")
+                ends.append((chain, int(residue), atom))
+            bonds.append(tuple(ends))
+    if job_bonds:
+        bonds = (bonds or []) + [tuple(tuple(end) for end in pair) for pair in job_bonds]
+    # 🔴 run_alphafold.py's prepare_input, which _fold_setup skips: the conventions a model applies to its INPUT before
+    # featurising - OpenFold3's main-MSA cap and dedupe, protenix's unpaired dedupe, the CCD UNK in place of GLY (a
+    # process-wide switch prepare_input sets). Without it a dump showed none of them (an X in an openbind0 batch read
+    # GLY's four atoms where the fold reads UNK's six), so a featuriser held to the dump was held to the wrong batch.
+    from alphafold3.common import folding_input as _fi
+    from alphafold3.model import model_registry
+    from alphafold3.model.pipeline import model_features
+    chains = chains or [_fi.ProteinChain(id="A", sequence=arguments.sequence, ptms=[], unpaired_msa="", paired_msa="",
+                                         templates=[])]
+    chains = list(model_features.prepare_input(
+        _fi.Input(name=arguments.model, chains=chains, rng_seeds=[job_seed]), model_registry.get(arguments.model)).chains)
+    # 🔴 THE LEAVING ATOMS AT DECLARED BONDS (protenix, opendde: the registry's ccd_leaving_atoms, af3-any-model
+    # b61bd1d) take effect only where featurise_input is handed the flag, which neither fold_check nor run_alphafold.py
+    # does at 3.1.16 - so a dump without this reads AlphaFold 3's rule for those families. Handed here where the
+    # registry asks for it.
+    if model_registry.get(arguments.model).featurise.get("ccd_leaving_atoms"):
+        from alphafold3.data import featurisation as _featurisation
+        _featurise = _featurisation.featurise_input
+        _featurisation.featurise_input = lambda *a, **k: _featurise(*a, **{"ccd_leaving_atoms": True, **k})
+    if arguments.has_msa:
+        _apply = model_features.apply
+        model_features.apply = lambda *a, **k: _apply(*a, **{**k, "has_msa": True})
+    batch, _cfg, _dir = _fold_setup(arguments.model, arguments.sequence, chains=chains,
+                                    bonded_atom_pairs=bonds, seed=job_seed)
+    features = feat_batch.Batch.from_data_dict(batch)
+    inputs = {}
+    for name, value in arrays(batch):
+        array = np.asarray(value)
+        if array.dtype == object or array.ndim == 0:
+            continue
+        inputs[name] = {"shape": list(array.shape), "dtype": str(array.dtype),
+                        "data": array.astype(np.float32).ravel().tolist()}
+    # ...and the atom-layout gathers, which live on the Batch rather than in the
+    # raw dict, under the flattened names the AF3 dump uses.
+    cross = features.atom_cross_att
+    for name in ("token_atoms_to_queries", "queries_to_keys", "queries_to_token_atoms",
+                 "tokens_to_queries", "tokens_to_keys", "token_atoms_to_pseudo_beta"):
+        gather = getattr(cross, name, None)
+        if gather is None:
+            gather = getattr(getattr(features, "pseudo_beta_info", None), name, None)
+        if gather is None:
+            continue
+        for leaf in ("gather_idxs", "gather_mask", "input_shape"):
+            value = getattr(gather, leaf, None)
+            if value is None:
+                continue
+            array = np.asarray(value)
+            inputs[f"{name}:{leaf}"] = {
+                "shape": list(array.shape), "dtype": str(array.dtype),
+                "data": array.astype(np.float32).ravel().tolist()}
+
+    tokens = int(np.asarray(features.token_features.mask).shape[0])
+    suffix = ""
+    if arguments.ligand is not None:
+        suffix += "-%s" % arguments.ligand.strip().lower().replace(",", "")
+    if arguments.ptm is not None:
+        suffix += "-%s" % arguments.ptm.strip().lower().replace("@", "")
+    if arguments.kind != "protein":
+        suffix += "-" + arguments.kind
+    if arguments.mods is not None:
+        suffix += "-" + arguments.mods.strip().lower().replace("@", "").replace(",", "-")
+    out = arguments.out or "/tmp/af3-batch-%s%s.json" % (arguments.model, suffix)
+    with open(out, "w") as handle:
+        json.dump({"model": arguments.model, "sequence": arguments.sequence,
+                   "tokens": tokens,
+                   "numMsa": int(np.asarray(batch["msa"]).shape[0]),
+                   "source": "sokrypton/alphafold3 @ af3-any-model, _fold_setup",
+                   **({"hasMsa": True} if arguments.has_msa else {}),
+                   "inputs": inputs, "outputs": {}}, handle)
+    print("wrote %s  tokens=%d  msa=%d  %.1f MB"
+          % (out, tokens, np.asarray(batch["msa"]).shape[0],
+             os.path.getsize(out) / 2 ** 20))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

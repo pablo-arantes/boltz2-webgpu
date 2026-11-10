@@ -1,0 +1,368 @@
+/**
+ * Which AF3-lineage graph a bundle's weights were trained for.
+ *
+ * 🔴 EVERY DIFFERENCE HERE IS SILENT WHEN WRONG. The shapes agree, the fold
+ * finishes, and what comes out is a slightly different model - so the only
+ * things that can catch a mistake are a checker that sweeps the dialect as an
+ * axis (tools/gpu/check-af3-atom-encoder.js and
+ * check-af3-diffusion-conditioning.js do) and the assertions here, which pin
+ * the table itself.
+ *
+ * 🔴 AND THE TABLE IS WHERE THE OPENFOLD3-VERSUS-OPENBIND TRAP LIVES. OpenBind
+ * is OpenFold3's v0.5.0 release and it moved TOWARD AlphaFold 3: it dropped the
+ * transposed column-attention pair bias its preview-2 weights were trained
+ * with. Reading the OF3 porting notes and applying them wholesale gets that
+ * backwards, and the resulting fold is wrong in a way nothing else in this
+ * repository would report.
+ */
+import { strict as assert } from "node:assert";
+import { describe, it } from "node:test";
+
+import {
+  ALPHAFOLD3, DIALECTS, OPENBIND0, OPENDDE, dialectFor, featuriserDialect,
+  singleCondPadding, singleCondPaddingWgsl, singleCondSource,
+} from "../shared/af3/dialect.js";
+import { af3Dialect } from "../shared/af3/weights/weights.js";
+import { featuriseProtein } from "../shared/af3/featurise/featurise.js";
+
+const LIGAND = {
+  code: "TST",
+  atoms: [
+    { name: "C1", element: 6, charge: 0, x: 0, y: 0, z: 0 },
+    { name: "O1", element: 8, charge: 0, x: 1.4, y: 0, z: 0 },
+    { name: "P1", element: 15, charge: 0, x: 3.0, y: 0, z: 0 },
+  ],
+  bonds: [{ from: 0, to: 1, order: 1 }, { from: 1, to: 2, order: 1 }],
+};
+
+describe("the dialect table", () => {
+  it("keeps OpenBind-0 on AF3's pair-bias convention, which OpenFold3 changed", () => {
+    // 🔴 THE ONE ASSERTION MOST WORTH HAVING. `swapTransposedBias` is threaded
+    // through the pairformer, the MSA stack, the template embedder and the
+    // confidence head; upstream's TRANSPOSED_COLUMN_PAIR_BIAS lists openfold3
+    // and deliberately not openbind. Turning it on here transposes every
+    // column attention's bias against weights that do not want it.
+    assert.equal(OPENBIND0.swapTransposedBias, false);
+    assert.equal(ALPHAFOLD3.swapTransposedBias, false);
+  });
+
+  /** The flags a dialect turns ON, which is the whole of what it says. */
+  const on = (dialect) => Object.entries(dialect)
+    .filter(([, value]) => value).map(([flag]) => flag).sort();
+
+  it("turns on exactly the branches OpenBind-0 needs", () => {
+    assert.deepEqual(on(OPENBIND0),
+      [
+      // 🔴 OF3's ATOMISED TOKENS AND LEAVING ATOMS (af3-any-model colab's of3 knobs, against its batches): UNK on the
+      // restype alone, a link only between two atomised residues, the CCD leaving group at a declared bond and a
+      // modified residue's at the chain ends, a ligand otherwise whole - and no DNA in its alignment.
+      "atomizedBackboneBonds", "atomizedUnknownRestype",
+      // 🔴 OPENFOLD3's FEATURISER, three ways AlphaFold 3's is not (af3-any-model b84aa69): an unknown amino acid is
+      // the CCD's UNK, the main MSA each chain's first 16384 rows deduplicated, and every (slot, token) without
+      // template atoms the GAP restype.
+      "ccdUnknownResidue",
+      // 🔴 CENTRE_REF_CONFORMERS: every family but stock AlphaFold 3 centres
+      // its reference conformers per `ref_space_uid`. Missing here, it was
+      // worth 2.89e-2 -> 2.47e-2 on openbind0's sequence-featurised
+      // `target_feat` against af3-any-model. See shared/af3/featurise/featurise.js.
+      "centreRefConformers", "declaredBondLeavingAtoms", "dnaGapMsa",
+      // 🔴 NO TERMINAL OXT AND NO 5' OP3, which is not an OpenFold-lineage
+      // question - protenix and opendde are in that lineage and deliberately
+      // KEEP the OXT. Carrying it put openbind0's last two atom windows 128
+      // indices each away from the reference's own gather, because a sliding
+      // window's edge is the atom COUNT. `tools/check-atom-windows.js` is the
+      // gate and all seven models are exact on it.
+      "dropTerminalAtoms",
+      "keepLigandLeavingAtoms", "keysUidFromQueriesLayout", "mainMsaCap", "maskPaddedKeys", "modifiedLeavingAtEnds",
+      "padSingleCondUnknownDna", "perAtomHeadsByRank", "symmetriseBonds", "templateGapWhereNoAtoms", "templateModified"]);
+  });
+
+  /**
+   * 🔴 OpenDDE's LINEAGE DOES NOT PREDICT ITS CONVENTIONS, AND THE TWO
+   * DISAGREEMENTS WITH OpenBind-0 STILL POINT IN OPPOSITE DIRECTIONS, on ONE
+   * flag rather than two. Both models are OpenFold3-lineage, and upstream's
+   * `TRANSPOSED_COLUMN_PAIR_BIAS` lists opendde and omits openbind, so the
+   * transposed pair bias is ON here and OFF there. Deriving it from the lineage
+   * gets it wrong.
+   *
+   * 🔴 THE PADDING USED TO BE THE SECOND HALF OF THAT PAIR AND IS NOT ANY MORE.
+   * This file said OpenDDE's converter "collapses it to 831 by remapping the
+   * 32-class vocabulary rather than padding it", which was true of the
+   * converter that produced the bundle in front of it. Upstream moved opendde
+   * into `PADDED_SINGLE_COND` on 2026-09-10 and its converter now emits the
+   * 833-row scale and projection. Measured on the re-exported bundle: the
+   * diffusion single conditioning was a uniform 0.12% small - exactly
+   * 1 - sqrt(831/833), because a LayerNorm maps a zero column to -mean/std and
+   * so normalises over the wider vector - and is now 3.48e-7 against
+   * af3-any-model's own.
+   */
+  it("disagrees with OpenBind-0 on the transposed bias, which is the point", () => {
+    assert.equal(OPENDDE.swapTransposedBias, true);
+    assert.equal(OPENBIND0.swapTransposedBias, false);
+    // ...and agrees with it on the padding, which it did not used to.
+    assert.equal(OPENDDE.padSingleCondUnknownDna, true);
+    assert.equal(OPENBIND0.padSingleCondUnknownDna, true);
+  });
+
+  it("turns on the branches OpenDDE needs, and no others", () => {
+    assert.deepEqual(on(OPENDDE), [
+      // 🔴 CENTRE_REF_CONFORMERS: every family but stock AlphaFold 3 centres
+      // its reference conformers per `ref_space_uid`. Missing here, it was
+      // worth 2.89e-2 -> 2.47e-2 on openbind0's sequence-featurised
+      // `target_feat` against af3-any-model. See shared/af3/featurise/featurise.js.
+      "centreRefConformers",
+      "chainedAtomLayerNorm",
+      // 🔴 DECLARED BONDS AS PROTENIX'S include_discont_poly_poly_bonds ("discontinuous": af3-any-model 964990e)
+      // 🔴 AND THE LEAVING GROUP AT EACH DECLARED BOND DROPPED BEFORE TOKENISING (af3-any-model b61bd1d)
+      "declaredBondLeavingAtoms",
+      "declaredPolymerBonds",
+      // 🔴 THE QUERY ONCE IN A SELF-MSA, and a ligand UNK in the MSA: protenix's featuriser (af3-any-model's
+      // dedupe_self_msa and native_nonprotein_msa for opendde)
+      "dedupeSelfMsa",
+      "distogramBias",
+      // 🔴 THE GAP RESTYPE IN ITS ONE EMPTY TEMPLATE SLOT, which is a VALUE
+      // (21) and not a boolean. OpenDDE takes protenix's featuriser, so a query
+      // with NO template still carries `template_aatype` 21 in slot 0 and 0 in
+      // the rest - and writing 0 everywhere was worth 2.07e-2 on the trunk's
+      // `z_after_template` seam against af3-any-model. See docs/AF3.md.
+      "emptyTemplateAatype",
+      "keepLigandLeavingAtoms", "keyMaskedAtomAttention",
+      // 🔴 THE KEYS' REFERENCE SPACE FROM THE QUERIES LAYOUT, as its vendor gates it: stock AF3 alone keeps
+      // upstream's token-layout gather (sokrypton/alphafold3 c8c6ba9)
+      "keysUidFromQueriesLayout",
+      "maskPaddedKeys",
+      "msaUpdateBeforeOuterProduct",
+      "nativeNonproteinMsa",
+      "padSingleCondUnknownDna",
+      // 🔴 WHERE THE ATOM KEY WINDOW SITS, WHICH IS NOT WHETHER ITS PADDED
+      // SLOTS ARE MASKED - `maskPaddedKeys` above is the second question. This
+      // family CLAMPS the window and masks what falls outside; AlphaFold 3
+      // slides it bodily in bounds. af3-any-model measured its own version of
+      // this at 6MRR 0.767 -> 0.737 here. See shared/af3/featurise/featurise.js.
+      "paddedAtomKeys",
+      "pairInitFromSingle",
+      "perBlockAtomPairLayerNorm",
+      "perBlockPairLayerNorm", "protenixUnpairedMsa", "sampler",
+      "splitPairConditioning",
+      "structuralTokens",
+      "swapTransposedBias",
+      "symmetriseBonds", "templateModified",
+      // 🔴 EACH CENTRED CONFORMER MOVED BY U(-1, 1) PER AXIS, protenix's inference augmentation (af3-any-model 345cb11)
+      "translateConformers",
+    ]);
+  });
+
+  it("leaves stock AlphaFold 3 with none of them", () => {
+    // 🔴 NOT EVERY ENTRY IS A BRANCH. Most are booleans and stock AF3 must have
+    // every one off. A few carry a VALUE instead - which columns an empty
+    // template slot sets, say - and for those "off" is null, because the models
+    // that have them disagree about the value rather than about whether the
+    // branch runs. The rule this protects is that no branch is on for stock
+    // AF3, so a value-carrying flag is held to null and a boolean to false;
+    // coercing the first to `false` would make its type a lie at the use site.
+    for (const [flag, value] of Object.entries(ALPHAFOLD3)) {
+      if (typeof value === "boolean") {
+        assert.equal(value, false, `${flag} is not false for stock AF3`);
+      } else {
+        assert.equal(value, null, `${flag} carries a value for stock AF3`);
+      }
+    }
+  });
+
+  it("gives every dialect every flag, so a use site cannot read undefined", () => {
+    // A missing flag reads as falsy at a use site that forgot to check for it,
+    // which is stock AF3's branch taken silently. Every consumer throws on
+    // undefined; this is the other half of that.
+    const flags = Object.keys(ALPHAFOLD3);
+    for (const [name, dialect] of Object.entries(DIALECTS)) {
+      assert.deepEqual(Object.keys(dialect).sort(), flags.slice().sort(),
+        `dialect ${name} does not carry the same flags as stock AF3`);
+    }
+  });
+
+  it("refuses a model it does not know rather than assuming stock", () => {
+    assert.throws(() => dialectFor("openfold3"), /no AF3 dialect/);
+    assert.throws(() => dialectFor(undefined), /no AF3 dialect/);
+    assert.equal(dialectFor("alphafold3"), ALPHAFOLD3);
+    assert.equal(dialectFor("openbind0"), OPENBIND0);
+    // 🔴 A LATER RELEASE MUST NOT RESOLVE. The whole reason the number is in
+    // the name is that a bare `openbind` would answer for OpenBind-1 too.
+    assert.throws(() => dialectFor("openbind1"), /no AF3 dialect/);
+  });
+});
+
+describe("a bundle names its own graph", () => {
+  it("reads the dialect out of the manifest", () => {
+    assert.equal(af3Dialect({ manifest: { model: { name: "openbind0" } } }), OPENBIND0);
+    // Upstream publishes the blob as `openbind`, and bundles exported before
+    // the rename say so; the alias keeps those loading.
+    assert.equal(af3Dialect({ manifest: { model: { name: "openbind" } } }), OPENBIND0);
+    assert.equal(af3Dialect({ manifest: { model: { name: "alphafold3" } } }), ALPHAFOLD3);
+  });
+
+  it("refuses a bundle whose manifest does not name a model", () => {
+    // 🔴 NOT A DEFAULT. A ported bundle missing this field would fold through
+    // stock AF3's branches and return a structure, which is the failure this
+    // whole mechanism exists to make impossible.
+    assert.throws(() => af3Dialect({ manifest: { model: {} } }), /does not name its model/);
+    assert.throws(() => af3Dialect({ manifest: {} }), /does not name its model/);
+    assert.throws(() => af3Dialect(undefined), /does not name its model/);
+  });
+});
+
+describe("the unknown-DNA columns of the diffusion single conditioning", () => {
+  it("adds nothing at all under stock AF3", () => {
+    assert.deepEqual(singleCondPadding(ALPHAFOLD3, 384), []);
+    assert.equal(singleCondPaddingWgsl([]), "");
+  });
+
+  it("puts one column after restype and one after profile", () => {
+    // [trunk single 384 | restype 31 | profile 31 | deletion mean 1 | atoms 384]
+    // becomes 833 rather than 831, and the two inserted columns sit at the end
+    // of the restype block and the end of the profile block.
+    assert.deepEqual(singleCondPadding(OPENBIND0, 384), [415, 447]);
+  });
+
+  it("maps every padded column back to the source it reads", () => {
+    const padding = singleCondPadding(OPENBIND0, 384);
+    // The trunk single block is untouched...
+    assert.equal(singleCondSource(padding, 0), 0);
+    assert.equal(singleCondSource(padding, 383), 383);
+    // ...the 31 restypes land where they were...
+    assert.equal(singleCondSource(padding, 384), 384);
+    assert.equal(singleCondSource(padding, 414), 414);
+    // ...then a zero, then the profile block shifted by one...
+    assert.equal(singleCondSource(padding, 415), -1);
+    assert.equal(singleCondSource(padding, 416), 415);
+    assert.equal(singleCondSource(padding, 446), 445);
+    // ...then a second zero, and everything after shifted by two.
+    assert.equal(singleCondSource(padding, 447), -1);
+    assert.equal(singleCondSource(padding, 448), 446);
+    assert.equal(singleCondSource(padding, 832), 830);
+  });
+
+  it("is exactly an insertion, checked by doing the insertion", () => {
+    // 🔴 THE PROPERTY, NOT A TABLE OF INDICES. Build the padded row the way a
+    // converter does - splice two zeros in - and assert singleCondSource
+    // reproduces it from the source row. A sign error in the shift shows up
+    // here and nowhere in the spot checks above.
+    const padding = singleCondPadding(OPENBIND0, 384);
+    const source = Float32Array.from({ length: 831 }, (_, i) => i + 1);
+    const spliced = [...source];
+    for (const at of padding) spliced.splice(at, 0, 0);
+    assert.equal(spliced.length, 833);
+    for (let index = 0; index < spliced.length; index += 1) {
+      const from = singleCondSource(padding, index);
+      assert.equal(spliced[index], from < 0 ? 0 : source[from],
+        `padded column ${index} reads the wrong source`);
+    }
+  });
+
+  it("generates WGSL with a guard and a shift for each inserted column", () => {
+    // The shader's `feature()` is generated from the same list the reference
+    // walks; this is what says the generator did not drop one.
+    const wgsl = singleCondPaddingWgsl(singleCondPadding(OPENBIND0, 384));
+    assert.equal((wgsl.match(/return 0\.0;/g) ?? []).length, 2);
+    assert.equal((wgsl.match(/source -= 1u;/g) ?? []).length, 2);
+    assert.match(wgsl, /if \(index == 415u\)/);
+    assert.match(wgsl, /if \(index == 447u\)/);
+    // 🔴 EVERY GUARD BEFORE EVERY SHIFT. Interleaving them would let the first
+    // shift move `index` out from under the second guard's comparison.
+    assert.ok(wgsl.lastIndexOf("return 0.0;") < wgsl.indexOf("source -= 1u;"),
+      "a shift is emitted before the last zero-column guard");
+  });
+
+  it("throws rather than assume a dialect that does not say", () => {
+    assert.throws(() => singleCondPadding({}, 384), /has no default/);
+    assert.throws(() => singleCondPadding(undefined, 384), /has no default/);
+  });
+});
+
+describe("the token bond matrix", () => {
+  const ligandMatrix = (symmetriseBonds) => {
+    const batch = featuriseProtein("GWSTELEKHR", { ligands: [LIGAND], symmetriseBonds });
+    const base = batch.ligandSpans[0].from;
+    return {
+      batch,
+      at: (i, j) => batch.bondMatrix[(base + i) * batch.tokens + (base + j)],
+      set: batch.bondMatrix.reduce((sum, value) => sum + value, 0),
+    };
+  };
+
+  it("is one direction per bond under stock AF3", () => {
+    const { at, set } = ligandMatrix(ALPHAFOLD3.symmetriseBonds);
+    assert.equal(at(0, 1), 1);
+    assert.equal(at(1, 0), 0);
+    assert.equal(set, LIGAND.bonds.length);
+  });
+
+  it("is symmetric under OpenBind-0, which is what its weights were trained on", () => {
+    // 🔴 NOT COSMETIC. Upstream measures a ring ligand folded through the wrong
+    // convention coming apart - ATP's ribose C-C at ~2.0 A against ~1.5 - and
+    // this matrix goes through a learned linear straight into the pair
+    // representation.
+    const { at, set } = ligandMatrix(OPENBIND0.symmetriseBonds);
+    assert.equal(at(0, 1), 1);
+    assert.equal(at(1, 0), 1);
+    assert.equal(set, LIGAND.bonds.length * 2);
+  });
+
+  it("clears [0,0] either way, because a padded gather row is zeros", () => {
+    for (const flag of [false, true]) {
+      assert.equal(ligandMatrix(flag).batch.bondMatrix[0], 0);
+    }
+  });
+});
+
+// 🔴 THE ATOMISED-TOKEN CONVENTIONS, AND THE POINT IS THAT NO FOLD GATE CAN SEE
+// THEM. All four are inert unless a batch carries a MODIFIED RESIDUE or a
+// LIGAND, and every fold gate in this repository folds a plain protein - so
+// they were absent from four dialects for as long as those dialects existed and
+// nothing objected. tools/check-batch-fields.js --target=gol-sep3 is what
+// measures them against the reference; this asserts the TABLE, which is the
+// half that needs no dump.
+it("the atomised-token conventions are the four the references show", () => {
+  const expected = {
+    alphafold3:   [false, false, false, false],
+    // openbind0 (of3): the unknown restype alone - its alignment keeps the letter - and a link between two atomised
+    openbind0:    [false, "aatype", false, "both"],
+    opendde:      [false, false, false, false],
+    protenix2:    [false, false, false, false],
+    // boltz2 gives an atomised token the unknown restype and leaves the
+    // ALIGNMENT holding the parent residue; rf3 moves both.
+    boltz2:       [false, true,  false, false],
+    intellifold2: [false, false, false, false],
+    rosettafold3: [true,  "nucleic", true, true],
+    // chai-1: an atomised amino acid 20 and an atomised nucleotide 30 (its DX/RX), in every alignment row
+    chai1:        [false, "chai", true, false],
+  };
+  for (const [model, want] of Object.entries(expected)) {
+    const dialect = dialectFor(model);
+    assert.deepEqual([dialect.atomizedElementNames, dialect.atomizedUnknownRestype,
+                      dialect.atomizedUnknownMsa, dialect.atomizedBackboneBonds],
+                     want, `${model}'s atomised-token conventions`);
+  }
+});
+
+// 🔴 AND THE FEATURISER'S VIEW OF A DIALECT IS ONE OBJECT, NOT A LIST THREE
+// CALL SITES COPY. `featuriserDialect` exists because tools/gpu/fold.js,
+// tools/gpu/fold-opendde.js and web/af3-model.js each named the fields by hand,
+// which is the allow-list shape CLAUDE.md records twice as having shipped a
+// bug. This asserts it carries every featuriser convention the table has, so
+// adding one to the table cannot leave a caller behind.
+it("featuriserDialect carries every featuriser convention", () => {
+  const carried = Object.keys(featuriserDialect(dialectFor("rosettafold3")));
+  for (const field of ["symmetriseBonds", "centreRefConformers", "paddedAtomKeys",
+                       "qblockAtomKeys", "dropTerminalAtoms", "dedupeSelfMsa",
+                       "atomizedElementNames", "atomizedUnknownRestype",
+                       "atomizedUnknownMsa", "atomizedBackboneBonds", "declaredBondFeature"]) {
+    assert.ok(carried.includes(field), `featuriserDialect drops ${field}`);
+  }
+  // ...and NOT the graph conventions: a featuriser has no business with a
+  // kernel flag, and sweeping the whole dialect in would make every future
+  // graph flag silently change a batch.
+  for (const field of ["noResidual", "chiralCentres", "distogramBins65"]) {
+    assert.ok(!carried.includes(field), `featuriserDialect should not carry ${field}`);
+  }
+  assert.deepEqual(featuriserDialect(undefined), {});
+});

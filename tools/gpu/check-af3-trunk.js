@@ -1,0 +1,348 @@
+/**
+ * AF3's whole trunk on the GPU, against cpu/af3/trunk/trunk.js.
+ *
+ *     node tools/gpu-chrome.mjs tools/gpu/check-af3-trunk.js
+ *     node tools/gpu-chrome.mjs tools/gpu/check-af3-trunk.js --n=256 --blocks=48 --no-check
+ *
+ * Every stage has its own checker. What this adds is the ORDER - in particular
+ * that the template embedding goes in on the part-built pair, after the
+ * relative encoding and before the MSA stack. Adding it to the finished pair
+ * instead is a natural reading of "add the template embedding" and a different
+ * model, and it runs.
+ *
+ * 🔴 THE PAIR IS COMPARED AGAINST A CONDITIONING ENVELOPE, not a constant. Past
+ * a few pairformer blocks a random pair representation is chaotic: two CPU runs
+ * differing by 1e-7 at the input diverge to ~6e-4. See tools/gpu/check-af3-block.js.
+ */
+import { runTrunk } from "../../cpu/af3/trunk/trunk.js";
+import {
+  fusedTemplateEmbedding, templateEmbedding,
+} from "../../cpu/af3/trunk/template.js";
+import { emptyFusedFeatures } from "../../webgpu/af3/trunk/template.js";
+import { Af3TrunkGpu } from "../../webgpu/af3/trunk/trunk.js";
+import { binEdges as binEdgesOf } from "../../webgpu/af3/trunk/trunk.js";
+import { af3Dialect, openAf3Store, trunkWeights } from "../../shared/af3/weights/weights.js";
+import { deviceTuning } from "../../webgpu/runtime/device-profile.js";
+import { CLASS_PROTEIN } from "../../shared/heads/contact-threshold.js";
+
+// 🔴 THE DIALECT IS THE BUNDLE'S, NOT A CONSTANT TYPED IN HERE. This was
+// `{ swapTransposedBias: false }` - one flag of thirteen - and the trunk has
+// refused to run for exactly that reason: `Af3MsaStackGpu` will not default
+// `msaUpdateBeforeOuterProduct`, because AF3 takes the outer product off the
+// PRE-update MSA and OpenDDE off the updated one, and guessing either would be
+// silently running a different model. So this checker did not compare anything
+// at all, which is the failure docs/PARITY.md records across the whole suite.
+//
+// Reading it from the manifest fixes both halves: the flag is named, and the
+// checker stops being pinned to AlphaFold 3 - point it at an OpenDDE or
+// openbind0 bundle with `--model=` and it checks that model's conventions
+// instead of asserting AF3's over them.
+const dialectFor = (store) => af3Dialect(store);
+
+function option(args, name, fallback) {
+  const prefix = `--${name}=`;
+  return args.find((argument) => argument.startsWith(prefix))?.slice(prefix.length) ?? fallback;
+}
+
+function deterministic(length, seed) {
+  let state = seed >>> 0;
+  const output = new Float32Array(length);
+  for (let index = 0; index < length; index += 1) {
+    state += 0x6d2b79f5;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    output[index] = (((value ^ (value >>> 14)) >>> 0) / 0x1_0000_0000) * 2 - 1;
+  }
+  return output;
+}
+
+function relativeRms(actual, expected) {
+  let error = 0;
+  let scale = 0;
+  for (let index = 0; index < expected.length; index += 1) {
+    const difference = actual[index] - expected[index];
+    error += difference * difference;
+    scale += expected[index] * expected[index];
+  }
+  return Math.sqrt(error / Math.max(scale, 1e-30));
+}
+
+// 🔴 THE WIDTHS ARE THE BUNDLE'S. `previousPair` was `tokens * tokens * 128`
+// and `targetFeat` was `tokens * 447` - AlphaFold 3's, typed in - so on
+// protenix2 (c_z 256) the recycling input was HALF the size the trunk reads and
+// the whole trunk came out NaN, envelope included. An envelope that is NaN is a
+// CPU reference disagreeing with itself, which is the tell: it is not a port
+// difference, it is a malformed input.
+function buildInput(tokens, sequences, chains, widths = {}) {
+  const pairChannels = widths.pairChannels ?? 128;
+  const singleChannels = widths.singleChannels ?? 384;
+  const targetFeatWidth = widths.targetFeatWidth ?? 447;
+  const perChain = Math.ceil(tokens / chains);
+  const residueIndex = new Int32Array(tokens);
+  const asymId = new Int32Array(tokens);
+  const entityId = new Int32Array(tokens);
+  const symId = new Int32Array(tokens);
+  for (let t = 0; t < tokens; t += 1) {
+    const chain = Math.floor(t / perChain);
+    asymId[t] = chain;
+    entityId[t] = chain === 1 ? 0 : chain;
+    symId[t] = chain === 1 ? 1 : 0;
+    residueIndex[t] = t - chain * perChain;
+  }
+  const seqMask = new Float32Array(tokens);
+  for (let t = 0; t < tokens; t += 1) seqMask[t] = t < Math.ceil(tokens * 0.85) ? 1 : 0;
+  const pairMask = new Float32Array(tokens * tokens);
+  for (let i = 0; i < tokens; i += 1) {
+    for (let j = 0; j < tokens; j += 1) pairMask[i * tokens + j] = seqMask[i] * seqMask[j];
+  }
+  // 🔴 EVERY TOKEN A PLAIN RESIDUE, WHICH IS AN ASSUMPTION AND IS STATED.
+  // This input is synthetic and protein-only, so `CLASS_PROTEIN` gives 8 A on
+  // every pair - the pseudo-beta convention, and the right one here. The head
+  // refuses to default it so a ligand-bearing input cannot get 8 A silently.
+  const contactClasses = new Int32Array(tokens).fill(CLASS_PROTEIN);
+  const msaRows = new Int32Array(sequences * tokens);
+  const deletionMatrix = new Float32Array(sequences * tokens);
+  const msaMask = new Float32Array(sequences * tokens);
+  for (let s = 0; s < sequences; s += 1) {
+    for (let t = 0; t < tokens; t += 1) {
+      const index = s * tokens + t;
+      msaRows[index] = (s * 7 + t * 3) % 32;
+      deletionMatrix[index] = ((s * 5 + t) % 9) / 2;
+      msaMask[index] = seqMask[t] > 0 && ((s * 7 + t * 3) % 11) < 8 ? 1 : 0;
+    }
+  }
+  return {
+    tokens, sequences, templates: 4,
+    targetFeat: deterministic(tokens * targetFeatWidth, 11 + tokens),
+    features: { residueIndex, tokenIndex: residueIndex, asymId, entityId, symId },
+    msaRows, deletionMatrix, msaMask, pairMask, seqMask, contactClasses,
+    previousPair: new Float32Array(tokens * tokens * pairChannels),
+    previousSingle: new Float32Array(tokens * singleChannels),
+  };
+}
+
+export async function main(device, args) {
+  const tokens = Number(option(args, "n", "24"));
+  const sequences = Number(option(args, "sequences", "8"));
+  const blocks = Number(option(args, "blocks", "4"));
+  // --model= so a second bundle's conventions can be checked, not AF3's
+  // asserted over them; the dialect follows the bundle either way.
+  const store = await openAf3Store(option(args, "model", undefined));
+  const weights = await trunkWeights(store, blocks, undefined, { allowPrefix: true });
+  const DIALECT = dialectFor(store);
+  const input = buildInput(tokens, sequences, 3, weights.embedder);
+
+  // 🔴 THE STAGED WORKGROUP BLOCKS' PRECISION IS AN AXIS HERE TOO. The pair
+  // track stages grid attention's key and value and the transition's two blocks
+  // in f16 wherever the device has shader-f16, so the assembled trunk cannot be
+  // held to the f32 path's number - and raising the one bound would stop the
+  // f32 path being checked at the 4.3e-6 it actually reaches.
+  // 🔴 TWO AXES, BECAUSE THEY ARE TWO DIFFERENT TRADES. `staged` narrows the
+  // workgroup blocks the pair track holds, which buys TIME; `weights` narrows
+  // the resident weight buffers, which buys MEMORY and no time at all. They
+  // land on different representations - the staged tiles move the pair and the
+  // contacts, the weights move the single - so one bound over both would hide
+  // whichever moved less.
+  const hasF16 = device.features.has("shader-f16");
+  const stagedPrecision = option(args, "staged", hasF16 ? "f16" : "f32");
+  const weightPrecision = option(args, "weights", hasF16 ? "f16" : "f32");
+  const accumulatePrecision = option(args, "accumulate", hasF16 ? "f16" : "f32");
+  const staged16 = stagedPrecision === "f16";
+  const weight16 = weightPrecision === "f16";
+  // 🔴 THE MATRIX PAIR KERNELS ARE A FOURTH AXIS, AND THE BOUND FOLLOWS THE
+  // KERNEL RATHER THAN THE REQUESTED STORAGE. `triangleProjectMatrix`,
+  // `gridProjectMatrix`, `gridAttendMatrix` and `pairTransitionSplit` issue on
+  // f16 matrix units and no precision option above reaches them, so this
+  // checker asked for f32 on all three of its axes and read 1.12e-4 - the SAME
+  // number as the f16 default. That is not a defect to fix but a trade the port
+  // takes deliberately: measured here, they are worth 14% of a trunk pass and
+  // 27% of the pairformer. What was wrong was the BOUND pretending they were
+  // not running. check-evoformer-attention.js already does this - where the
+  // device picks the matrix kernel its f32 arm runs a second time with the
+  // matrix path off, because otherwise the f32 path stops being checked at all.
+  //
+  //   f16 axes + matrix   1.12e-4      f16 axes, matrix off   1.85e-5
+  //   f32 axes + matrix   1.12e-4      f32 axes, matrix off   6.66e-7
+  //
+  // `--matrix=off` is the arm that actually gets f32, and it is the one held to
+  // the envelope rule.
+  const tuning = deviceTuning(device);
+  const matrixWanted = option(args, "matrix", "auto") !== "off";
+  const matrixLive = matrixWanted && [tuning.triangleProjectMatrix, tuning.gridProjectMatrix,
+    tuning.gridAttendMatrix, tuning.pairTransitionSplit].some((v) => v !== undefined
+      && v !== null && v !== false);
+  const gpu = await new Af3TrunkGpu(
+    device, { stagedPrecision, weightPrecision, accumulatePrecision,
+              pairMatrixKernels: matrixWanted })
+    .run(input, weights, DIALECT, {
+    pairMatrixKernels: matrixWanted,
+    onStage: (name, ms) => console.log(`  ${name}\t${ms.toFixed(0)} ms`),
+  });
+
+  if (args.includes("--no-check")) {
+    const total = Object.values(gpu.timings).reduce((sum, value) => sum + value, 0);
+    console.log(`trunk\tn=${tokens}\t${blocks} pairformer blocks\t${total.toFixed(0)} ms`);
+    return { tokens, blocks, timings: gpu.timings };
+  }
+
+  // 🔴 TWO TEMPLATE EMBEDDERS, AND THE BUNDLE SAYS WHICH. protenix2 and boltz2
+  // run the fused module, whose tensors this function cannot find - the checker
+  // died at `Cannot read properties of undefined` inside `linear`, which names
+  // neither the module nor the model.
+  const embedTemplate = (pair) => (weights.template.fused
+    ? fusedTemplateEmbedding(
+      { pair, pairMask: input.pairMask, tokens, templates: 4,
+        templateFeatures: emptyFusedFeatures(undefined, tokens,
+                                             weights.template.featureWidth, DIALECT) },
+      weights.template, DIALECT)
+    : templateEmbedding(
+      { pair, pairMask: input.pairMask, tokens, templates: 4, templateOccupied: false },
+      weights.template, DIALECT));
+
+  // The reference, with the template embedder wired the same way round.
+  const cpu = runTrunk({ ...input,
+    templateEmbedding: (pair) => embedTemplate(pair),
+  }, weights, DIALECT);
+
+  // The conditioning envelope, as in check-af3-block.js.
+  const perturbation = Number(option(args, "perturbation", "1e-7"));
+  const perturbed = { ...input, targetFeat: Float32Array.from(input.targetFeat) };
+  for (let index = 0; index < perturbed.targetFeat.length; index += 1) {
+    perturbed.targetFeat[index] += input.targetFeat[index] * perturbation;
+  }
+  const control = runTrunk({ ...perturbed,
+    templateEmbedding: (pair) => embedTemplate(pair),
+  }, weights, DIALECT);
+  const envelope = relativeRms(control.pair, cpu.pair);
+  // 🔴 THE SOFTMAX HEADS GET THEIR OWN ENVELOPE. contactProbs is a softmax
+  // ratio over 64 bins, so it amplifies whatever error reaches the logits by a
+  // factor that depends on their spread - comparing it against the PAIR's
+  // envelope would be comparing two different sensitivities.
+  const contactEnvelope = relativeRms(control.contactProbs, cpu.contactProbs);
+  const logitsEnvelope = relativeRms(control.logits, cpu.logits);
+
+  // 🔴 SPLITTING THE CONTACT HEAD'S ERROR IN TWO. contactProbs is a softmax
+  // ratio, so it amplifies whatever reaches the logits. Recomputing it on the
+  // CPU FROM THE GPU'S OWN LOGITS separates the two possible sources: agreement
+  // here means the GPU head's arithmetic is sound and the residual is the
+  // trunk's error being amplified; disagreement would mean the head itself.
+  const contactFromLogits = (logits) => {
+    const breaks = binEdgesOf();
+    const spacing = breaks[breaks.length - 1] - breaks[breaks.length - 2];
+    const isContact = [];
+    for (let bin = 0; bin < 64; bin += 1) {
+      const top = bin < 63 ? breaks[bin] : breaks[breaks.length - 1] + spacing;
+      isContact.push(top <= 8.0 + 1e-3);
+    }
+    const output = new Float32Array(tokens * tokens);
+    for (let row = 0; row < tokens * tokens; row += 1) {
+      const base = row * 64;
+      let largest = -Infinity;
+      for (let bin = 0; bin < 64; bin += 1) {
+        if (logits[base + bin] > largest) largest = logits[base + bin];
+      }
+      let total = 0;
+      let contact = 0;
+      for (let bin = 0; bin < 64; bin += 1) {
+        const probability = Math.exp(logits[base + bin] - largest);
+        total += probability;
+        if (isContact[bin]) contact += probability;
+      }
+      output[row] = input.pairMask[row] * (contact / total);
+    }
+    return output;
+  };
+  const headOnly = relativeRms(gpu.contactProbs, contactFromLogits(gpu.logits));
+  const amplified = relativeRms(contactFromLogits(gpu.logits), cpu.contactProbs);
+
+  const pairRms = relativeRms(gpu.pair, cpu.pair);
+  const singleRms = relativeRms(gpu.single, cpu.single);
+  const contactRms = relativeRms(gpu.contactProbs, cpu.contactProbs);
+  const logitsRms = relativeRms(gpu.logits, cpu.logits);
+  console.log(`trunk\tn=${tokens}, ${sequences} sequences, ${blocks} pairformer blocks`);
+  console.log(`pair\trelRMS ${pairRms.toExponential(2)}`
+    + `\t(envelope ${envelope.toExponential(2)}, ${(pairRms / Math.max(envelope, 1e-30)).toFixed(1)}x)`);
+  console.log(`single\trelRMS ${singleRms.toExponential(2)}`);
+  console.log(`contact\trelRMS ${contactRms.toExponential(2)}`
+    + `\t(envelope ${contactEnvelope.toExponential(2)},`
+    + ` ${(contactRms / Math.max(contactEnvelope, 1e-30)).toFixed(1)}x)`);
+  console.log(`  of which the GPU head's own arithmetic: ${headOnly.toExponential(2)}`);
+  console.log(`  and the trunk's logits amplified:       ${amplified.toExponential(2)}`);
+  console.log(`logits\trelRMS ${logitsRms.toExponential(2)}`
+    + `\t(envelope ${logitsEnvelope.toExponential(2)},`
+    + ` ${(logitsRms / Math.max(logitsEnvelope, 1e-30)).toFixed(1)}x)`);
+
+  // 🔴 DERIVED FROM THE ARITHMETIC, NOT FROM WHAT PASSES. Both f16 axes are
+  // measured here, separately and together, over 48 blocks:
+  //
+  //     staged weights acc      pair     single    contact    logits
+  //     f32    f32     f32    6.18e-7    6.21e-7   9.76e-5   4.46e-7
+  //     f16    f32     f32    1.04e-5    2.91e-6   1.86e-4   6.83e-6
+  //     f32    f16     f32    6.18e-7    8.04e-5   9.76e-5   4.46e-7
+  //     f16    f16     f32    1.04e-5    8.06e-5   1.86e-4   6.83e-6
+  //     f16    f16     f16    1.99e-5    8.06e-5   1.33e-3   1.26e-5
+  //
+  // 🔴 THAT TABLE HAS BEEN WRONG ONCE AND IT IS WORTH SAYING HOW. Two of its
+  // rows were measured under a configuration the columns do not name - one with
+  // the PAIR track's weights in f16 as well, which is off by default, and one
+  // before the second triangle projection took the accumulate axis. Both read
+  // as facts about the labelled combination and were not. Re-measure the whole
+  // table when a row moves; a row measured against a different tree is worse
+  // than no row.
+  //
+  // 🔴 AND IT WENT WRONG A THIRD WAY, WHICH THIS TABLE IS THE EVIDENCE FOR.
+  // Packing the pair track's scratch two f16 halves to a word turned the last
+  // row's pair term from the 1.99e-5 written here into 1.04e-4, and nobody
+  // re-measured - so the table stayed right about a tree nobody was running.
+  // The packing is gone (see UNPACKED_PAIR_SCRATCH) and the shipped
+  // configuration reads 1.99e-5 again, which is what says the packing was a
+  // regression rather than a new baseline. A storage format is a row here too,
+  // even though it has no column.
+  //
+  // 4e-5 is 3x the worst pair measurement: these runs are deterministic, so the
+  // margin is for scheduling and not for drift, and a bug moves this by orders
+  // rather than by a factor. The f32 arm keeps its envelope rule and still
+  // measures 1.0x it.
+  const accumulate16 = accumulatePrecision === "f16";
+  // 🔴 AND THE MATRIX ARM GETS ITS OWN, 3x THE MEASUREMENT, exactly as the f16
+  // row does. 4e-4 against a measured 1.12e-4. A wrong kernel still misses this
+  // by orders; what it stops doing is reporting an accepted trade as a defect
+  // every run, which is how a gate becomes something people ignore.
+  const pairBound = matrixLive ? 4e-4
+    : (staged16 || weight16 || accumulate16) ? 4e-5 : Math.max(1e-5, envelope * 10);
+  if (pairRms > pairBound) {
+    throw new Error(`pair relRMS ${pairRms.toExponential(2)} exceeds ${pairBound.toExponential(2)}`);
+  }
+  // 🔴 THE SINGLE TRACK IS WHERE THE f16 WEIGHTS SHOW, AND ALMOST ONLY THERE.
+  // Read down the `weights` column of the table above: the single track moves
+  // by 130x and the pair by 13x, where the staged tiles do the reverse. That
+  // the two axes land on different representations is what says they are two
+  // effects and not one measured twice. 2e-4 is 2.5x the measurement.
+  const singleBound = weight16 ? 2e-4 : staged16 ? 4e-5 : 1e-5;
+  if (singleRms > singleBound) {
+    throw new Error(`single relRMS ${singleRms.toExponential(2)} exceeds ${singleBound}`);
+  }
+  // 🔴 THE CONTACT PROBABILITIES DO NOT GET A TIGHT BOUND, AND SETTING ONE
+  // WOULD BE A MISTAKE. They are a softmax ratio over 64 bins, and measurement
+  // says they amplify the logits they come from by about 235x: the GPU's logits
+  // differ from the reference by 4.6e-7 and its contacts by 1.1e-4. That is
+  // conditioning, not error - recomputing the contacts on the CPU from the
+  // GPU's OWN logits agrees to 3.8e-8, so the head's arithmetic is exact and
+  // every bit of the difference arrives from upstream.
+  //
+  // So the head is bounded on what it can be held to (its own arithmetic), and
+  // the contact figure is reported rather than asserted, with only a sanity
+  // ceiling. A tolerance tight enough to "catch" 1.1e-4 here would fail on any
+  // correct implementation that rounds differently.
+  if (headOnly > 1e-5) {
+    throw new Error(`the distogram head's own arithmetic is off by `
+      + `${headOnly.toExponential(2)}, recomputed from its own logits`);
+  }
+  if (contactRms > 1e-2) {
+    throw new Error(`contact relRMS ${contactRms.toExponential(2)} is past the sanity ceiling`);
+  }
+  return { tokens, sequences, blocks, pairRms, singleRms, contactRms, logitsRms,
+           envelope, contactEnvelope, headOnly,
+           timings: gpu.timings };
+}

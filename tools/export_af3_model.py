@@ -1,0 +1,479 @@
+#!/usr/bin/env python3
+"""Write a LocalFold float32 model directory from AF3-lineage parameters.
+
+    python3 tools/export_af3_model.py                     # the trunk, from AF3
+    python3 tools/export_af3_model.py --model openbind0   # ...from OpenBind-0
+    python3 tools/export_af3_model.py --include diffuser  # everything
+
+The output is the shape tools/quantize_model.py consumes - manifest.json plus
+weights-NN.f32.bin shards, every tensor float32 - so the int8 packing, the
+sharding limits and the digest bookkeeping stay in the tooling that already
+produces the shipped monomer and multimer models.
+
+WHERE THE WEIGHTS COME FROM. A ColabDesign2 blob: one zstd stream of (scope,
+name, array) records, which is what its converters emit for all seven
+AF3-lineage checkpoints (OpenFold3, Boltz-2, Chai-1, Protenix, RF3, IntelliFold,
+OpenDDE). Reading the blob rather than any one checkpoint format is the whole
+point - a second model becomes a different --blob, not a second exporter.
+
+🔴 WHICH CHECKPOINT FILLED THE BUNDLE IS RECORDED IN IT. AF3's own parameters
+carry DeepMind's Weights Terms of Use; OpenFold3's are Apache 2.0; both build
+the same graph and both land in `model-af3/`, so the directory cannot say which
+is inside. The manifest's model.name does, and tools/build_site.py reads it and
+requires LOCALFOLD_ACCEPT_MODEL_TERMS before publishing a restricted one. The
+page gates the download behind licence acceptance for the same reason.
+
+🔴 THE TENSOR NAMES ARE THE HAIKU PATHS, UNCHANGED. The AF2 exports rename every
+tensor to `stack_haiku_0042` and keep the real structure in nested manifest
+sections; that made sense when the manifest had to describe a graph the loader
+already knew. Here the names ARE the description, they match the oracle's module
+paths character for character, and a tensor that is wrong can be found by
+grepping for it in both places. 213 names cost 27 KiB in the compiled manifest.
+
+🔴 ONLY THE TRUNK BY DEFAULT. The diffusion head is 203 M of the 368 M
+parameters and the confidence head another 13 M, and neither has a graph to run
+on yet. Exporting them would triple the download to ship bytes nothing reads.
+--include widens the export when that changes; the manifest records what was
+taken so a bundle can never quietly be half a model.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import struct
+import sys
+from pathlib import Path
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parent.parent
+# 🔴 THE REFERENCE IS af3-any-model, NOT ColabDesign2. `colabdesign2.af3.*`
+# is being replaced by sokrypton/alphafold3 on the `af3-any-model` branch, so
+# that is what the frozen constants below are read from; ColabDesign2 remains a
+# fallback only while both exist, and its path moved once already
+# (`af3.alphafold3` -> `af3.alphafold`), which is why this looks for several.
+AF3_REFERENCE = os.path.expanduser(
+    os.environ.get("LOCALFOLD_AF3_REFERENCE", "~/alphafold3"))
+COLABDESIGN2 = os.path.expanduser("~/Documents/GitHub/ColabDesign2")
+# One blob per model, each obtained from source and checked against the graph's
+# own jax.eval_shape table before use.
+#
+# 🔴 openbind IS DOWNLOADED, NOT CONVERTED HERE. It is OpenFold3's v0.5.0
+# release, published already converted at
+# huggingface.co/sokrypton/af3-any-model, and `read_blob` above reads that file
+# directly - so adding it needed no torch, no 2.3 GB checkpoint and no second
+# checkout:
+#
+#     mkdir -p ~/af3_ported && cd ~/af3_ported
+#     curl -sSLO https://huggingface.co/sokrypton/af3-any-model/resolve/\
+#       bc9038fdabff2a06968f85e91838fe49c936d68f/openbind.bin.zst
+#
+# 🔴 AND THE REVISION IS PINNED, for the reason the shard URLs are: a blob
+# fetched from a moving branch can change under a bundle that did not, and the
+# resulting failure names neither half. `openbind.shapes.json` beside it is the
+# conversion's own coverage record - it reports 406 arrays and 0 missing, and
+# names `of3-ob-174k.pt` as the source.
+#
+# 🔴 openbind0 IS NOT openfold3, WHATEVER THE LINEAGE SUGGESTS. They are two
+# releases of one project with different forward conventions - see
+# shared/af3/dialect.js - so they are two entries, and the manifest's model.name
+# is what carries the difference into the page.
+#
+# 🔴 AND THE RELEASE NUMBER IS PART OF THE NAME. Upstream's announcement calls
+# this model OpenBind-0, and their own registry's bare `openbind` is a name a
+# LATER release would also answer to - which is exactly how `openfold3` came to
+# mean two models with different forward conventions. A bundle named openbind0
+# cannot be mistaken for OpenBind-1 by a loader that has never heard of it.
+# `openbind` is kept as an alias, because that is the name upstream publishes
+# the blob under.
+# 🔴 opendde IS DOWNLOADED THE SAME WAY, AND IT IS A DIFFERENT KIND OF PORT.
+# OpenBind-0 is AlphaFold 3's graph with AlphaFold 3's widths - 406 arrays, the
+# same names, two shape differences. OpenDDE is an independent PyTorch
+# reimplementation in the same family, and the blob says so: 481 arrays against
+# AF3's 406, of which 240 share a name and only 123 share a SHAPE.
+#
+#     mkdir -p ~/af3_ported && cd ~/af3_ported
+#     curl -sSLO https://huggingface.co/sokrypton/af3-any-model/resolve/\
+#       13db85d4867fd0d7f7d91f24f9e20c36eca78004/opendde/opendde.bin.zst
+#
+# 🔴 AND ITS TRUNK IS THE PART THAT TRANSFERS. Every pairformer, MSA-stack and
+# template tensor has AlphaFold 3's name and a different WIDTH - the pair track
+# is 384 channels rather than 128, the MSA 128 rather than 64, the triangle
+# attention 12 heads rather than 4 (2 rather than 4 in the template stack) and
+# the distogram 96 bins rather than 64. That is why shared/af3/weights/weights.js derives
+# every width from the tensor that states it: this bundle loads through
+# AlphaFold 3's declared widths without complaint and dispatches every kernel
+# over a third of its own tensor.
+#
+# 🔴 WHAT DOES NOT TRANSFER IS THE CONFIDENCE HEAD AND THE TOKEN SET. OpenDDE
+# expands each residue into about two "structural tokens" between the trunk and
+# the diffusion (`structural_token_expander`, `structural_token_refiner`) and
+# runs a confidence head of its own design on them - 51 tensors under
+# `confidence_head/pairformer_stack` with none of AlphaFold 3's names. So the
+# trunk and the distogram head are exported and the rest is not yet; see
+# docs/OPENDDE.md.
+# 🔴 protenix2 IS OPENDDE'S DIALECT WITH FOUR FLIPS, WHICH IS WHY IT IS CHEAP.
+# Protenix-v2 (Apache 2.0, best-A 0.703 in the reference's table) sits in
+# OPENFOLD3_LINEAGE exactly as OpenDDE does, so the lineage branches - bond
+# symmetrisation, the element index shift, trained Fourier weights - are already
+# built. Against OpenDDE its convention membership differs in four places, and
+# only four:
+#
+#     MSA_UPDATE_BEFORE_OPM          opendde yes, protenix2 NO
+#     DIFFUSION_PROJECTED_RELPOS     opendde no,  protenix2 YES
+#     PRE_SYMMETRISED_PDE            opendde no,  protenix2 YES
+#     TEMPLATE_MEAN_OVER_ALL_SLOTS   opendde no,  protenix2 YES
+#
+# ...and it does NOT expand structural tokens, which is OpenDDE's one difference
+# that is not a flag. Its widths are its own (c_z 256, c_m 128, 8 trunk triangle
+# heads, 2 template, msa value_dim 8) and shared/af3/weights/weights.js derives every one
+# from the tensor that states it, so they need no table here.
+#
+#     curl -sSLO https://huggingface.co/sokrypton/af3-any-model/resolve/main/\
+#       protenix/protenix2.bin.zst
+BLOBS = {
+    "alphafold3": "~/af3_official_weights/af3.bin.zst",
+    "openfold3": "~/af3_converted_cd2/of3_ported_weights.bin.zst",
+    "openbind0": "~/af3_ported/openbind.bin.zst",
+    "opendde": "~/af3_ported/opendde.bin.zst",
+    "protenix2": "~/af3_ported/protenix2.bin.zst",
+    # Boltz-2, MIT, best-A 0.430 - the strongest model in the reference's table.
+    #     curl -sSLO https://huggingface.co/sokrypton/af3-any-model/resolve/main/\
+    #       boltz2/boltz2.bin.zst
+    "boltz2": "~/af3_ported/boltz2.bin.zst",
+    # IntelliFold-2 and RoseTTAFold3, the two AF3-lineage checkpoints the
+    # reference supports that this port had not read. On the oracle box they
+    # live under ~/ported/<model>/; both are converted the same way and the
+    # exporter does not care which vendor wrote them.
+    "intellifold2": "~/ported/intellifold2/intellifold2.bin.zst",
+    "rosettafold3": "~/ported/rosettafold3/rosettafold3.bin.zst",
+    # Chai-1 (Apache 2.0), not OpenFold-derived: chai ships frozen TorchScript, and af3-any-model's converter maps
+    # it onto AlphaFold 3's scopes. Its tokens also read ESM2 3B (lm/esm2.bin.zst, a separate bundle).
+    #     curl -sSLO https://huggingface.co/sokrypton/af3-any-model/resolve/main/chai1/chai1.bin.zst
+    "chai1": "~/af3_ported/ref/weights/chai1/chai1.bin.zst",
+    # Mol-1 (Molence Bio, Apache 2.0): Protenix-2's model with a PairMixer stack and a 320-wide trunk (af3-any-model's
+    # mol1-port branch, converters/mol1.py).
+    #     curl -sSLO https://huggingface.co/sokrypton/af3-any-model/resolve/1b41e3337b861081c321420c3f4a40ff9e2a6044/mol1/mol1.bin.zst
+    "mol1": "~/af3_ported/mol1.bin.zst",
+}
+
+# The trunk: the evoformer stacks, the conditioning that builds their inputs
+# (including the atom transformer encoder, which produces 384 of target_feat's
+# 447 columns), and the distogram head that reads the pair out.
+TRUNK = ("diffuser/evoformer", "diffuser/distogram_head")
+
+# Per model: matrices a quantised bundle must still carry as float32, because
+# the activations they multiply are large enough that a few percent of weight
+# error swamps the signal. They reach tools/quantize_af3.py as `float32Tensors`.
+#
+# 🔴 Mol-1's trunk single transition2. Its trained weights hold six trunk single
+# channels at ~3e5 on every token (af3-any-model's FP32_TRUNK_SINGLE), and the
+# gated activation transition2 multiplies reaches 6.6e4. At int5 g32 the error
+# that lands in every output channel is thousands: the channels inside the
+# confidence head's +/-512 clamp, which carry the per-token signal it reads,
+# came out wrong in sign and size (channel 72: 4478 against -397), and pLDDT
+# went flat - 87.8 on a random 80-mer, 84.3 on poly-G, 87.8 on ubiquitin,
+# against 74 / 78 / 92 from the float32 bundle. With these two tensors (28 M
+# parameters, +88 MiB) float32 the int5 bundle reads 73.8 / 77.4 / 92.5. int7
+# for the whole transition is not enough (88.5), and transition1 alone at
+# float32 does nothing (87.8).
+#
+# 🔴 boltz2's contact conditioning, at both of its sites: the encoder a pocket or contact constraint runs through and the
+# Fourier projection of its distance (17 k parameters each, +130 KiB). Read on the host into a table of a few rows
+# (shared/af3/featurise/constraints.js), so the cost is bytes alone; at int5 g32 the term came out 1.3-5.6% from
+# float32's (the confidence site's 12 A contact the worst), where the rest of the pair is held to its own int5 error.
+# And its two class constants (128 floats each): with any constraint every pair it does not mark is UNSELECTED - 99% of
+# them on the harness cases - and at int5 that class's shift from unspecified came out 17-22% from float32's.
+MODEL_FLOAT32 = {
+    "mol1": re.compile(r"/single_transition/transition2/weights$"),
+    # (and its DN rows - Boltz's DNA unknown, three vectors - which the published bundle has always carried as float32)
+    "boltz2": re.compile(r"/contact_(encoder|fourier)/weights$|/contact_encoding_(unspecified|unselected)$|/boltz2_dn_"),
+}
+
+# 🔴 SIZED IN FLOAT32 BYTES, FOR AN INT8 RESULT, exactly as the multimer export
+# is: quantize_model.py maps shard to shard, so a 48 MiB float32 shard lands at
+# about 12 MiB - the size the shipped monomer's shards are, and the size that
+# measured best against making four times as many requests for the same bytes.
+#
+# 🔴 AF3 IS PACKED TO int5, NOT int8, SO ITS SHARDS LAND NEARER 10 MiB. That is
+# why the shipped af3-int5 bundle clusters there rather than at 12: the limit is
+# calibrated for a quantiser it is no longer paired with. Harmless, and worth
+# expressing per target dtype whenever this is next re-exported.
+#
+# 🔴 AND A SHARD IS AT LEAST ONE WHOLE TENSOR, which is what `and self.chunks`
+# below means: a tensor over the limit gets a file to itself rather than being
+# split, because a reader takes it from one contiguous span in one file. AF3's
+# single-transition weights are stacked over 48 blocks and land at 40.5 MiB
+# against a 7.9 MiB median - the two outliers in that bundle are one tensor
+# each. Evening them out means letting a tensor span shards, which is a manifest
+# and reader change; measured, it is not worth it - splitting the largest across
+# four ranges saved 7%, and fetching biggest-first saved nothing at all, because
+# a cold load is bytes over bandwidth long before it is a tail.
+SHARD_LIMIT = 48 * 1024 * 1024
+
+
+class ShardWriter:
+    """Lay tensors into float32 shards, four-byte aligned, none over the limit."""
+
+    def __init__(self, out_dir: Path):
+        self.out_dir = out_dir
+        self.records: dict[str, dict] = {}
+        self.chunks: list[bytes] = []
+        self.offset = 0
+        self.index = 0
+
+    def _flush(self) -> None:
+        if not self.chunks:
+            return
+        path = self.out_dir / f"weights-{self.index:02d}.f32.bin"
+        with path.open("wb") as handle:
+            for chunk in self.chunks:
+                handle.write(chunk)
+        self.chunks, self.offset, self.index = [], 0, self.index + 1
+
+    def add(self, name: str, values: np.ndarray) -> None:
+        flat = np.ascontiguousarray(values, dtype="<f4").reshape(-1)
+        if self.offset + flat.nbytes > SHARD_LIMIT and self.chunks:
+            self._flush()
+        self.records[name] = {
+            "file": f"weights-{self.index:02d}.f32.bin",
+            "shape": list(values.shape),
+            "byteOffset": self.offset,
+            "dtype": "float32",
+        }
+        self.chunks.append(flat.tobytes())
+        self.offset += flat.nbytes
+
+    def close(self) -> None:
+        self._flush()
+
+
+def decode(data: bytes, dtype: str, length: int, offset: int, shape) -> np.ndarray:
+    """One record's buffer as an array.
+
+    🔴 AlphaFold 3's OWN BLOB IS bfloat16, WHICH numpy HAS NO DTYPE FOR. It is
+    the top sixteen bits of a float32 and nothing else - same exponent, seven
+    mantissa bits - so widening is a shift, not a conversion, and it needs no
+    ml_dtypes. Every ported blob this reads is float32; discovering that AF3's
+    is not was the first thing this reader did.
+    """
+    if dtype == "bfloat16":
+        raw = np.frombuffer(data, dtype="<u2", count=length // 2, offset=offset)
+        return (raw.astype(np.uint32) << 16).view(np.float32).reshape(shape)
+    numpy_dtype = np.dtype(dtype)
+    return np.frombuffer(data, dtype=numpy_dtype, count=length // numpy_dtype.itemsize,
+                         offset=offset).reshape(shape)
+
+
+def read_blob(path: str):
+    """(scope, name, array) records out of a haiku parameter blob.
+
+    🔴 READ HERE RATHER THAN THROUGH A CHECKOUT, because the format is a wire
+    format and this is thirty lines of it. It is AlphaFold 3's own
+    (`src/alphafold3/model/params.py`, `encode_record`): a `<5i` header giving
+    the lengths of the scope, the name, the dtype string, the shape and the
+    buffer, then those five fields back to back, repeated to the end of the
+    stream, the whole thing zstd-compressed when the name says `.zst`. Both
+    producers this project reads write exactly that - ColabDesign2's converters
+    and the `converters/` package in a sokrypton/alphafold3 checkout - so
+    importing either one to parse it made the exporter depend on a clone at a
+    hardcoded path for a struct.unpack.
+
+    🔴 AND THAT MATTERS FOR A PORTED MODEL SPECIFICALLY. `openbind.bin.zst` is
+    published on Hugging Face already converted; needing a torch environment and
+    a 2 GB checkpoint to read a file that has been downloaded is the difference
+    between "add a model" and "set up a machine".
+    """
+    path = os.path.expanduser(str(path))
+    if path.endswith(".zst"):
+        try:
+            import zstandard
+        except ImportError as error:
+            raise SystemExit(
+                f"reading {path} needs zstandard: pip install zstandard") from error
+        with open(path, "rb") as handle:
+            data = zstandard.ZstdDecompressor().stream_reader(handle).read()
+    else:
+        with open(path, "rb") as handle:
+            data = handle.read()
+
+    header = struct.Struct("<5i")
+    records = []
+    at = 0
+    while at < len(data):
+        if len(data) - at < header.size:
+            raise SystemExit(f"{path}: {len(data) - at} trailing bytes, "
+                             f"too few for a {header.size}-byte record header")
+        scope_len, name_len, dtype_len, rank, buffer_len = header.unpack_from(data, at)
+        at += header.size
+        take = lambda n: data[at:at + n]  # noqa: E731
+        scope = take(scope_len).decode("utf-8"); at += scope_len
+        name = take(name_len).decode("utf-8"); at += name_len
+        dtype = take(dtype_len).decode("utf-8"); at += dtype_len
+        shape = struct.unpack_from(f"<{rank}i", data, at); at += rank * 4
+        values = decode(data, dtype, buffer_len, at, shape)
+        at += buffer_len
+        # 🔴 THE IDENTIFIER RECORD IS NOT A PARAMETER. A blob written by
+        # `converters/common.py` opens with `__meta__/__identifier__`, 64 bytes
+        # naming the model; AF3's own carries the same. Handing it to the
+        # exporter's name matching would have it looking for a tensor.
+        if scope == "__meta__":
+            continue
+        records.append((scope, name, np.asarray(values)))
+    return records
+
+
+# Where a checkpoint keeps its Fourier noise embedding, when it keeps one.
+FOURIER_SCOPE = "diffuser/~/diffusion_head"
+FOURIER_LEAVES = ("fourier_embedding_weight", "fourier_embedding_bias")
+
+
+def stock_fourier_constants():
+    """AF3's frozen Fourier weight and bias, as arrays.
+
+    🔴 STOCK AF3 KEEPS THESE IN ITS SOURCE, NOT IN ITS CHECKPOINT. DeepMind
+    generated them once from a fixed seed and froze them "to future proof
+    against changes in jax rng generation", so a stock export has no tensor for
+    them while every PORTED model of the lineage trained its own and carries it
+    under the names above. Baking the constants in under those same names is
+    what lets one loader read either: the alternative is a table compiled into
+    the page that silently applies somebody else's random projection the moment
+    the weights change.
+    """
+    if COLABDESIGN2 not in sys.path:
+        sys.path.insert(0, COLABDESIGN2)
+    # 🔴 THE PACKAGE PATH MOVED AND THIS WENT STALE: ColabDesign2 renamed
+    # `af3.alphafold3` to `af3.alphafold`, so the exporter raised
+    # ModuleNotFoundError on a box that HAS the package - which reads as "the
+    # dependency is missing" and is "the dependency moved". Both are tried, and
+    # the error names both rather than whichever was attempted last.
+    noise_level_embeddings = None
+    attempted = []
+    # af3-any-model first: it is the reference. Its package is `alphafold3`
+    # under src/, so the checkout root goes on the path with /src appended.
+    for root in (os.path.join(AF3_REFERENCE, "src"), AF3_REFERENCE, COLABDESIGN2):
+        if root and os.path.isdir(root) and root not in sys.path:
+            sys.path.insert(0, root)
+    for module in ("alphafold3.model.network",
+                   "colabdesign2.af3.alphafold.model.network",
+                   "colabdesign2.af3.alphafold3.model.network"):
+        attempted.append(module)
+        try:
+            noise_level_embeddings = __import__(
+                f"{module}.noise_level_embeddings", fromlist=["noise_level_embeddings"])
+            break
+        except ModuleNotFoundError:
+            continue
+    if noise_level_embeddings is None:
+        raise ModuleNotFoundError(
+            "the noise-level Fourier constants are in none of "
+            + ", ".join(attempted)
+            + f" - looked under {AF3_REFERENCE} and {COLABDESIGN2}. Set "
+            "LOCALFOLD_AF3_REFERENCE to an af3-any-model checkout. See the note "
+            "above: they must come from the real source rather than be regenerated.")
+    return (np.asarray(noise_level_embeddings._WEIGHT, dtype=np.float32),
+            np.asarray(noise_level_embeddings._BIAS, dtype=np.float32))
+
+
+def export(blob_path: str, out_dir: Path, include: tuple[str, ...],
+           model: str) -> int:
+    records = read_blob(blob_path)
+    # ...synthesised only when the checkpoint has none, so a trained embedding
+    # is never overwritten by the constants.
+    if not any(scope == FOURIER_SCOPE and name in FOURIER_LEAVES
+               for scope, name, _ in records):
+        weight, bias = stock_fourier_constants()
+        records = list(records) + [
+            (FOURIER_SCOPE, FOURIER_LEAVES[0], weight),
+            (FOURIER_SCOPE, FOURIER_LEAVES[1], bias),
+        ]
+    wanted = [(scope, name, array) for scope, name, array in records
+              if scope.startswith(include)]
+    if not wanted:
+        print(f"nothing in the blob starts with any of {include}", file=sys.stderr)
+        return 1
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    writer = ShardWriter(out_dir)
+    # ...sorted, so the byte layout is a function of the contents and re-running
+    # the export twice produces identical shards. The digests in the compiled
+    # manifest are checked at build time; a layout that depended on dict order
+    # would fail that check for no reason.
+    keep_float32 = []
+    model_float32 = MODEL_FLOAT32.get(model)
+    for scope, name, array in sorted(wanted):
+        tensor = f"{scope}/{name}"
+        writer.add(tensor, array)
+        # LayerNorm scales and offsets, and every bias. They are 0.14% of the
+        # trunk's parameters - about half a mebibyte - and they are where
+        # per-block int8 is worst: a 128-element vector is two blocks, so two
+        # scales carry the whole tensor, and a norm's job is to set the scale of
+        # everything downstream of it. Free to keep, so keep them.
+        # ...and the Fourier embedding, which is 512 numbers and a RANDOM
+        # PROJECTION: quantising it would perturb the very thing whose spread
+        # makes the embedding informative, to save half a kilobyte.
+        if (name in ("offset", "scale", "bias") or name in FOURIER_LEAVES
+                or (model_float32 is not None and model_float32.search(tensor))):
+            keep_float32.append(tensor)
+    writer.close()
+
+    excluded = sorted({scope.split("/")[1] for scope, _, _ in records
+                       if not scope.startswith(include) and "/" in scope})
+    parameters = sum(int(np.prod(record["shape"])) for record in writer.records.values())
+    manifest = {
+        "formatVersion": 1,
+        "source": f"AF3-lineage parameters from {Path(blob_path).name}",
+        "model": {"name": model, "recycles": 0},
+        "bundle": {"purpose": "browser-inference", "model": model,
+                   "encoding": "float32-le"},
+        # 🔴 WHAT WAS LEFT OUT, IN THE ARTEFACT ITSELF. A bundle carrying only the
+        # trunk is correct today and wrong the moment something asks it for the
+        # diffusion head, and the difference has to be visible without going back
+        # to the exporter's default argument.
+        "coverage": {"included": list(include), "excludedScopes": excluded},
+        "float32Tensors": keep_float32,
+        "tensors": writer.records,
+    }
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+    written = sum(path.stat().st_size for path in out_dir.glob("*.f32.bin"))
+    print(f"{out_dir.name}/  {len(writer.records)} tensors,"
+          f" {parameters / 1e6:.1f} M parameters,"
+          f" {written / 1048576:.0f} MiB float32 across {writer.index} shards"
+          f"  ({len(keep_float32)} kept float32)")
+    if excluded:
+        print(f"  not exported: {', '.join(excluded)}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--model", default="alphafold3", choices=sorted(BLOBS),
+                        help="which checkpoint of the lineage to export")
+    parser.add_argument("--blob", default=None,
+                        help="an AF3-lineage parameter blob (default: the model's)")
+    parser.add_argument("--out", default=None,
+                        help="default: model-af3-f32, or model-<model>-f32")
+    parser.add_argument("--include", nargs="+", default=list(TRUNK),
+                        help="scope prefixes to export (default: the trunk)")
+    parser.add_argument("--colabdesign2", default=None,
+                        help="where ColabDesign2 is checked out")
+    arguments = parser.parse_args()
+    if arguments.colabdesign2:
+        global COLABDESIGN2
+        COLABDESIGN2 = os.path.expanduser(arguments.colabdesign2)
+    blob = arguments.blob or BLOBS[arguments.model]
+    # One bundle directory for the AF3 graph, whichever checkpoint of the
+    # lineage fills it. Which one that was is recorded in the manifest's
+    # model.name, and tools/build_site.py reads it there before publishing -
+    # see RESTRICTED_TERMS, which is why the name has to be in the artefact
+    # rather than only in the directory it landed in.
+    out = arguments.out or str(ROOT / "model-af3-f32")
+    return export(os.path.expanduser(blob), Path(out),
+                  tuple(arguments.include), arguments.model)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

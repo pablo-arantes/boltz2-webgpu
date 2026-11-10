@@ -1,0 +1,101 @@
+{
+  "name": "localfold",
+  "version": "0.0.1",
+  "license": "Beerware",
+  "type": "module",
+  "description": "WebGPU protein structure prediction in the browser - AlphaFold 2 (monomer and multimer), AlphaFold 3, ESMFold2 and OpenDDE",
+  "//": "A published package AND this repository's dev manifest. Nothing here is needed to open the page or run the CPU tests: `files` ships shared/, cpu/ and webgpu/ only, and everything under devDependencies belongs to one of the optional lanes below.",
+  "homepage": "https://localfold.org",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sokrypton/localfold.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sokrypton/localfold/issues"
+  },
+  "keywords": [
+    "alphafold",
+    "protein-structure",
+    "webgpu",
+    "esmfold",
+    "protein-folding"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "shared",
+    "cpu",
+    "webgpu",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": "./webgpu/index.js",
+    "./node": "./webgpu/node.js",
+    "./shared/*": "./shared/*",
+    "./cpu/*": "./cpu/*",
+    "./webgpu/*": "./webgpu/*"
+  },
+  "peerDependencies": {
+    "webgpu": "*"
+  },
+  "//peerDependencies": "Dawn's node binding, for `localfold/node` only - a browser caller brings its own GPUDevice and needs nothing installed. 0.6.0's linux-x64 prebuilt wants GLIBC 2.38; use 0.4.0 below that.",
+  "peerDependenciesMeta": {
+    "webgpu": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "//test": "--js-float16array is asked for ONLY when this node lacks Float16Array and its V8 lists the flag, so a node that already ships the type and a node too old to know the flag both run unchanged. Without it twelve tests do not fail, they never RUN - see CLAUDE.md.",
+    "test": "node $(node --v8-options 2>/dev/null | grep -qe '--js-float16array' && node -e 'process.exit(typeof Float16Array === \"undefined\" ? 0 : 1)' && echo --js-float16array) --test --test-concurrency=1 $(ls test/*.test.js | grep -v '\\.gpu\\.')",
+    "//test:gpu": "Needs a Dawn that loads on this glibc AND the fixtures under test/fixtures/evoformer/, which are gitignored - 24 of them are ENOENT on a fresh checkout. tools/gpu-chrome.mjs is the lane that works here; see CLAUDE.md, including the create() toggles these 25 call sites do not pass.",
+    "test:gpu": "LOCALFOLD_GPU_TESTS=1 node --test --test-concurrency=1 test/*.gpu.test.js",
+    "//test:stock": "The configuration a VISITOR has: no shader-f16 and no subgroup matrix units, which is every NVIDIA Chrome. Two of the four models did not fold here at all - see docs/A100.md. Needs the bundles, like the other GPU lanes.",
+    "test:stock": "node tools/check-stock-flags.mjs",
+    "//test:browser": "playwright.config.js is the config - testDir test/browser, and it starts `python3 -m http.server 4173` itself. It still needs a browser: `npx playwright install chromium`. Without one it is 4 failed on 'Executable doesn't exist'.",
+    "test:browser": "playwright test",
+    "//typecheck": "ADVISORY, not a gate: 1075 errors on this tree. It checks JS against @webgpu/types and most of what it reports is missing DOM and window augmentation rather than anything a fold would notice.",
+    "typecheck": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm test",
+    "serve": "python3 -m http.server 4173",
+    "build:site": "python3 tools/build_site.py",
+    "export:web-model": "node tools/export-web-model.js",
+    "export:js-weights": "python3 tools/export-js-weights.py",
+    "bench": "node tools/benchmark-triangle.js",
+    "bench:attention": "node tools/benchmark-attention.js",
+    "bench:a3m-stack": "node tools/benchmark-a3m-stack.js",
+    "bench:a3m-model": "node tools/benchmark-a3m-model.js",
+    "deploy": "python3 tools/deploy.py",
+    "test:portable": "node tools/check-portable-limits.mjs",
+    "test:spec-floor": "node tools/check-portable-limits.mjs --spec-floor",
+    "test:batch": "node tools/check-atom-windows.js && node tools/check-batch-fields.js",
+    "test:ligand": "node tools/check-ligand-path.mjs",
+    "test:modified": "node tools/check-modified-path.mjs",
+    "//test:template": "Every model's TEMPLATE moves its fold, on a target that needs one. Both oracle checkers for this stage drive the module with templates: 1 where a FOLD pads to four, so a wrong denominator is exact in every module check and a quarter strength in every fold - which is what rosettafold3 was. 5CAJ chain A, with and without.",
+    "test:template": "node tools/check-template-path.mjs",
+    "test:smiles": "node tools/check-smiles-vs-rdkit.mjs && node tools/check-stereo-vs-rdkit.mjs && node tools/check-smiles-rewrites.mjs && node tools/check-smiles-conformer.mjs",
+    "test:smiles-batch": "node tools/check-smiles-batch.mjs",
+    "test:smiles-path": "node tools/check-smiles-path.mjs",
+    "test:cache": "node tools/gpu-chrome.mjs tools/gpu/check-pipeline-key-collisions.js",
+    "//test:site": "Assembles dist/ and runs build_site.py's own unresolved-import check. 🔴 THE ONLY GATE THAT SEES A CONSTRUCTED PATH. The src/ reorganisation broke five python tools that build paths from segments - (ROOT / \"src\" / \"reference\" / \"manifests\" / \"index.js\") - where no literal path exists for any pattern to match, and test/imports-resolve.test.js found none of them. Run this after any move under src/.",
+    "//check:safari": "Parses every shipped module with this Mac's system JavaScriptCore, the engine of its Safari. Syntax an older Safari cannot parse (regex lookbehind before 16.4, class static blocks) fails the whole module at load, before any code runs. macOS only; skips elsewhere. See docs/RFD4P-FROM-LOCALDESIGN.md.",
+    "check:safari": "node tools/check-safari-syntax.mjs",
+    "//check:python": "Does every python tool run on the OLDEST python3 a developer here has (3.9, Apple's /usr/bin/python3 on the M2)? Every python gate in this file is spelled `python3 <tool>`, so the version is the machine's - and a tool needing 3.10 dies in a `def` line with a TypeError about `|`, which reads as a bug in the tool. build_site.py did, so `npm run test:site` was broken on that Mac. The twin of check:safari, for the other interpreter this repository is run with.",
+    "check:python": "python3 tools/check-python-portability.py",
+    "test:site": "python3 tools/build_site.py",
+    "//test:delta": "Does the shipped uploader ADD a delta to weights that are already resident? AlphaFold 2 is five models and a bundle is 97 MiB where a delta is 43; this holds `planBlockUpload(..., { accumulate: true })` to ZERO differing f16 results on real AlphaFold tensors, with two controls - the same plan with the flag off must DIFFER, and the result must land nearer the model the delta names than the base does. Needs the base and delta bundles on disk; see tools/pack_delta_model.py.",
+    "test:delta": "node tools/gpu-chrome.mjs tools/gpu/check-delta-upload.js --target=/model-mono-3",
+    "//test:pending": "A result belongs to the model that made it: switching the model row veils the structure and the map and takes the confidence numbers away, rather than leaving the previous model's answer under the new model's name. It borrows python/localfold/server.py as a FIXTURE to get a prediction onto a page without weights, and measures the veil as pixels.",
+    "test:pending": "python3 tools/check-model-pending.py",
+    "test:switch": "python3 tools/check-model-switch.py",
+    "//test:tools": "Every tool has a header line saying what it is, and docs/TOOLS.md lists exactly the tools that exist with exactly those lines. 🔴 44 TOOLS WERE NAMED BY NOTHING AT ALL - not CLAUDE.md's table, not docs/, not another tool - including working differential checkers. The index is DERIVED from each file's own header, so an entry cannot drift from it; regenerate with `python3 tools/index-tools.py --write`.",
+    "test:tools": "python3 tools/index-tools.py"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@webgpu/types": "0.1.72",
+    "typescript": "7.0.2",
+    "webgpu": "0.6.0"
+  }
+}

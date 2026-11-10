@@ -1,0 +1,1186 @@
+// A whole ESMFold2 fold on the GPU: a sequence in, a structure out.
+//
+//     node tools/gpu-chrome.mjs tools/gpu/fold-esmfold2.js \
+//       --sequence=MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQ --sampler=diffusion-15
+//
+// 🔴 THIS IS THE PORT FOLDING, NOT A DIFFERENTIAL. Every stage is LocalFold's
+// own - ESM-C's 36 blocks, the shim's pair, the featuriser, the inputs
+// embedder, twenty-four trunk blocks four times over, the conditioning, the
+// token transformer, the atom decoder and the sampler - and the only input is
+// the sequence. Each stage has been checked against the native model
+// separately; what this answers is whether they compose into a structure.
+//
+// 🔴 AND THE GEOMETRY IS THE GATE, NOT THE COORDINATES. The sampler draws a
+// rotation, a translation and a noise vector per step from its own RNG, so this
+// cannot reproduce ESMFold2's coordinates and a checker that tried would be
+// measuring the RNG. What it reports instead is the CA-CA spacing - 3.8 A is a
+// peptide bond, and a port with the arithmetic subtly wrong gives a plausible
+// cloud at the wrong scale - and, when a reference structure is supplied, the
+// RMSD after superposition.
+import {
+  readTensor, readTensorAsFloat16, tensorByteLength,
+} from "../../shared/weights/dtype.js";
+import { GpuBufferAllocator } from "../../webgpu/runtime/allocator.js";
+import { EsmcTowerGpu } from "../../webgpu/esmc/tower.js";
+import { foldEsmfold2, SAMPLER_PRESETS } from "../../webgpu/esmfold2/fold.js";
+import {
+  atomDecoderWeights, atomEncoderWeights, denoiserWeights, featuriserWeights,
+  trunkBlockWeights,
+  confidenceHeadWeights,
+} from "../../shared/esmfold2/weights.js";
+import { SHIM_PAIR_TENSORS } from "../../webgpu/esmfold2/language-pair.js";
+import { weightedRigidAlign } from "../../cpu/esmfold2/sampler.js";
+import { ccdUrl, parseCcdComponent } from "../../shared/af3/featurise/ccd-component.js";
+import { nameSmilesLigands, smilesComponent } from "../../shared/chem/component.js";
+import { toDensePositions } from "../../shared/esmfold2/featurise.js";
+import { toPdb } from "../../webgpu/af3/fold.js";
+// 🔴 THE SHARED SCORER, NOT A SECOND COPY. `bondGeometry` reads each residue's
+// bonds from the CCD - stated bonds with orders, not a distance cutoff - and
+// takes a `components` map so a modified residue is scored against its OWN
+// dictionary entry. docs/AF2.md's rule: a fold is not scored against itself.
+import { bondGeometry } from "./bond-geometry.js";
+import { memorySnapshot } from "../../webgpu/runtime/device-memory.js";
+import { setDeviceTuning } from "../../webgpu/runtime/device-profile.js";
+import { setMemoryBudget } from "../../webgpu/runtime/device-memory.js";
+import {
+  CONTACT_EDGES, contactAngstromsFor,
+} from "../../webgpu/esmfold2/distogram.js";
+import { assertChainGeometry, chainGeometryOf } from "./chain-geometry.js";
+
+import { profileBuffers } from "./buffer-profile.js";
+import { profileDevice } from "./profile.js";
+
+const option = (args, name, fallback) => {
+  const prefix = `--${name}=`;
+  return (args ?? []).find((a) => a.startsWith(prefix))?.slice(prefix.length) ?? fallback;
+};
+
+const BLOCK_LEAVES = ["attn_norm/scale", "attn_norm/offset", "qkv/weights",
+  "q_norm/scale", "k_norm/scale", "attn_out/weights", "ffn_norm/scale",
+  "ffn_norm/offset", "fc1/weights", "fc2/weights"];
+/** The four matrices the tower stores at half precision anyway. */
+const NARROW_LEAVES = new Set(["qkv/weights", "attn_out/weights",
+  "fc1/weights", "fc2/weights"]);
+const TOWER_SHARED = ["embed/weights", "final_norm/scale", "lm/combine", "lm/norm/scale",
+  "lm/norm/offset", "lm/projection/weights", "lm/downproject/weights",
+  "lm/downproject/bias"];
+
+export function reader(bundle) {
+  const shards = new Map();
+  let table;
+  // 🔴 CLOSURES, NOT METHODS, BECAUSE `read` IS PASSED AROUND. Every weight
+  // helper takes `read` as a bare function; an object method loses `this` the
+  // moment it is handed over, and the failure - "cannot read properties of
+  // undefined" inside a shard lookup - names neither the bundle nor the tensor.
+  const manifest = async () => {
+    if (table === undefined) table = await (await fetch(`${bundle}/manifest.json`)).json();
+    return table;
+  };
+  // 🔴 ONE FETCH A SHARD, EVEN WITH TEN READS IN FLIGHT. Ten leaves of a block
+  // live in one shard and are asked for together; storing the PROMISE rather
+  // than the buffer is what stops ten concurrent reads each fetching it.
+  const openShard = async (record) => {
+    if (!shards.has(record.file)) {
+      shards.set(record.file, (async () =>
+        (await fetch(`${bundle}/${record.file}`)).arrayBuffer())());
+    }
+    return shards.get(record.file);
+  };
+  const recordFor = async (name) => {
+    const loaded = await manifest();
+    const record = loaded.tensors[name];
+    if (record === undefined) throw new Error(`${bundle} has no tensor ${name}`);
+    return record;
+  };
+  const read = async (name, half = false) => {
+    const record = await recordFor(name);
+    const shard = await openShard(record);
+    return half
+      ? readTensorAsFloat16(record, shard, record.byteOffset ?? 0)
+      : readTensor(record, shard, record.byteOffset ?? 0, true);
+  };
+  // 🔴 WHERE THE BYTES ARE, WITHOUT DECODING ANY OF THEM - the same contract
+  // HttpTensorStore.tensorSource has, so the GPU dequantiser can take these.
+  // See webgpu/esmc/tower.js: the tower's four big matrices are 4.8 seconds
+  // of host int3 decoding on a first fold, and this is how they skip it.
+  const source = async (name) => {
+    const record = await recordFor(name);
+    const shard = await openShard(record);
+    return { record, buffer: shard, byteOffset: record.byteOffset ?? 0 };
+  };
+  // 🔴 HUNG OFF `read`, BECAUSE THAT IS WHAT THE LOADERS ARE HANDED. Every
+  // ESMFold2 weight helper takes a bare `read` function - see the note in
+  // shared/esmfold2/weights.js about methods losing `this` - so the two halves a
+  // lazy loader needs travel as properties of it: `source` for the bytes and
+  // `decode` for the host fallback, synchronous so it can sit behind a getter.
+  read.source = source;
+  read.decode = (s) => readTensor(s.record, s.buffer, s.byteOffset, true);
+  // 🔴 EVERY SHARD AT ONCE, WHICH IS WHAT THE PAGE DOES AND THIS DID NOT. The
+  // tower streams its 36 blocks and asks for a shard when it reaches one, so
+  // its fetches were effectively serial: measured, 522 ms of a 934 ms tower
+  // pass was `await pending` - the NEXT block's weights, i.e. the download.
+  // web/esmfold2-model.js has called `towerStore.prefetch()` since it was
+  // written, so that 522 ms was a property of this tool and not of a fold, and
+  // a tool whose shape differs from the page's is a tool measuring the wrong
+  // thing. See the note on --bundle above, which is the same mistake.
+  const prefetch = async () => {
+    const loaded = await manifest();
+    const files = new Set(Object.values(loaded.tensors).map((record) => record.file));
+    for (const file of files) {
+      if (shards.has(file)) continue;
+      shards.set(file, (async () => (await fetch(`${bundle}/${file}`)).arrayBuffer())());
+    }
+  };
+  return { manifest, read, source, prefetch };
+}
+
+/** Alpha carbons, by name: 'CA' is [35, 33, 0, 0] under chr(code + 32). */
+function alphaCarbons(features) {
+  const names = features.refAtomNameChars;
+  const out = [];
+  for (let atom = 0; atom < features.atoms; atom += 1) {
+    if (features.mask[atom] !== 0 && names[atom * 4] === 35 && names[atom * 4 + 1] === 33
+        && names[atom * 4 + 2] === 0) out.push(atom);
+  }
+  return out;
+}
+
+export async function main(device, args = []) {
+  // 🔴 CHAINS ARE COLON-JOINED AND THEIR KINDS ARE A SEPARATE LIST, because
+  // the letters cannot say which is which: `A`, `C` and `G` are alanine,
+  // cysteine and glycine in a protein chain and adenine, cytosine and guanine
+  // in a nucleic one.
+  const sequence = option(args, "sequence",
+    "MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQ");
+  const kinds = option(args, "kinds", "");
+  // 🔴 A LIGAND IS ONE TOKEN PER HEAVY ATOM AND ITS GEOMETRY COMES FROM THE
+  // CCD, over the network. `parseCcdComponent` is AF3's reader and the
+  // components are the same ones - ESMFold2 reads the same dictionary through
+  // RDKit rather than through mmCIF, and takes the ideal conformer for the same
+  // reason.
+  const ligandCodes = option(args, "ligands", "").split(",").filter((c) => c !== "");
+  // ...and a ligand by SMILES (`|`-separated), built by shared/chem as the page builds one.
+  const smilesList = option(args, "smiles", "").split("|").filter((c) => c !== "");
+  // 🔴 CODE@POSITION, 1-BASED, AS THE PAGE COUNTS. `npm run test:modified`
+  // folds a SEP@3 through seven AF3-lineage bundles and could not reach this
+  // one - `probe-modified.js` opens an AF3 store and calls `foldBatch` - which
+  // is why an ESMFold2 fold silently dropped its modification for as long as it
+  // did, and why a USER found that and no gate did.
+  const modifySpec = option(args, "modify", "");
+  // 🔴 PRICED AGAINST THE SAMPLER'S OWN SPREAD, NOT AGAINST ZERO. The trunk's
+  // two f16 knobs - the transition's staged tiles and the triangle projection's
+  // accumulators - are worth 1.09x and 1.17x at 150 tokens, and the question is
+  // not what they cost a tensor norm but whether the STRUCTURE notices. Written
+  // `staged:accumulate`, or one name for both.
+  const trunkPrecision = option(args, "trunk-precision", "");
+  // The element the TRUNK's weight buffers hold, which is neither of the two
+  // above and is what stagedMatrixDirectWeights needs - see the note on
+  // weightPrecision in webgpu/esmfold2/trunk.js.
+  const trunkWeights = option(args, "trunk-weights", "");
+  for (const pair of (args ?? []).filter((a) => a.startsWith("--tune="))
+       .flatMap((a) => a.slice("--tune=".length).split(",")).filter(Boolean)) {
+    const at = pair.indexOf("=");
+    if (at < 0) throw new Error(`--tune wants key=value, got ${pair}`);
+    const raw = pair.slice(at + 1);
+    let value;
+    try { value = JSON.parse(raw); } catch { value = raw; }
+    setDeviceTuning(device, { [pair.slice(0, at)]: value });
+  }
+  const submissionWindow = Number(option(args, "submission-window", "16"));
+  const foldBundle = option(args, "bundle", "/model-esmfold2-trunk-f32");
+  const towerBundle = option(args, "esmc", "/model-esmc-600m-int3");
+  const sampler = option(args, "sampler", "diffusion-15");
+  // the discretisation (cpu/esmfold2/sampler.js), the native port's flags: --schedule=geometric,
+  // --update=exponential, --no-churn, and --steps= over the preset's count
+  const samplerOverrides = {
+    ...(option(args, "schedule", undefined) ? { schedule: option(args, "schedule", undefined) } : {}),
+    ...(option(args, "update", undefined) ? { update: option(args, "update", undefined) } : {}),
+    ...(args.includes("--no-churn") ? { churn: false } : {}),
+    ...(option(args, "steps", undefined) ? { steps: Number(option(args, "steps", undefined)) } : {}),
+  };
+  const seed = Number(option(args, "seed", "0"));
+  // 🔴 THE REFERENCE IS A DIFFERENT SAMPLE, NOT A DIFFERENT ANSWER. The sampler
+  // draws a rotation, a translation and a noise vector per step; this uses its
+  // own RNG, so the honest comparison is RMSD after superposition and a few
+  // angstroms is what agreement LOOKS like here.
+  const reference = option(args, "reference", "");
+  // 🔴 THE 8 A CONTACT THRESHOLD IS A RESIDUE-RESIDUE CONVENTION AND A LIGAND
+  // TOKEN IS NOT A RESIDUE. `--contact-sweep` keeps the whole distogram - 46
+  // MiB at 300 tokens - and reports, per pair KIND, what each threshold would
+  // call a contact and how well the head predicts a DISTANCE at all.
+  const contactSweep = args.includes("--contact-sweep");
+  // 🔴 `lm_mask_pct`, WHICH THIS CHECKPOINT SETS TO ZERO. The knob exists so the
+  // port is complete for a checkpoint that does set it, and so the cost of the
+  // training-time corruption can be MEASURED rather than guessed at.
+  const lmMask = Number(option(args, "lm-mask", "0"));
+  // 🔴 THIS MODEL'S "SINGLE SEQUENCE" ARM. AF2 and AF3 fold without an
+  // alignment; the analogue here is folding without the protein language model,
+  // which is where this model's evolutionary information comes from.
+  const noPlm = args.includes("--no-plm");
+  // The element the denoiser's token blocks hold their weights in; see
+  // webgpu/esmfold2/diffusion.js. Unset lets the fold choose.
+  const denoiserWeightElement = option(args, "denoiser-weights", "");
+  // 🔴 FOLD TWICE, THE SECOND TIME REUSING THE TRUNK, which is the only way to
+  // check that the saving is real and that the answer is the same one.
+  const twice = args.includes("--reuse-trunk");
+  // 🔴 FOLD THE WHOLE THING AGAIN, REUSING NOTHING, which is what a page does
+  // when a user pastes a second sequence. `--reuse-trunk` skips the language
+  // model entirely and so cannot see what a second fold actually costs; this
+  // repeats the fold from the top and reports each one's timings, which is the
+  // only way to price the tower's weight residency.
+  const repeat = Number(option(args, "repeat", "1"));
+  // 🔴 A CEILING, SO THE TOWER'S RESIDENCY REFUSAL CAN BE MADE TO FIRE. Its 36
+  // blocks are about 890 MiB in halves and it keeps them only when the budget
+  // is at least four times that; below the line it streams as it always did.
+  // A fallback nothing has taken is a fallback nobody has checked.
+  const budgetMiB = Number(option(args, "budget", "0"));
+  if (budgetMiB > 0) setMemoryBudget(device, budgetMiB * 1024 * 1024);
+  // 🔴 THE TRUNK'S PASS COUNT, WHICH IS THE PAGE'S RECYCLE DIAL. Upstream runs
+  // `range(num_loops + 1)` and this checkpoint's `num_loops` is 3, so the
+  // default is four passes and `--recycles=3` is that.
+  const recycles = Number(option(args, "recycles", "3"));
+  if (SAMPLER_PRESETS[sampler] === undefined) {
+    throw new Error(`unknown sampler ${sampler}; `
+      + `expected one of ${Object.keys(SAMPLER_PRESETS).join(", ")}`);
+  }
+
+  const fold = reader(foldBundle);
+  const tower = reader(towerBundle);
+  // Started, not awaited: the point is that they are in flight while the
+  // manifests, the pipelines and the ESMFold2 weights are being dealt with.
+  void fold.prefetch();
+  void tower.prefetch();
+  const manifest = await fold.manifest();
+  const towerTable = await tower.manifest();
+  const towerManifest = towerTable.languageModel ?? {};
+  if (towerManifest.shim !== manifest.trunk?.source) {
+    throw new Error(`the tower's shim is for ${towerManifest.shim} `
+      + `and the folding bundle is ${manifest.trunk?.source}; the shim is per model`);
+  }
+  const M = manifest.trunk;
+
+  // 🔴 THE SHIM'S SINGLE HALF IS NEEDED EVEN THOUGH THE TOWER COMPUTES IT.
+  // A non-protein token never reaches the tower, and its hidden state is ZERO
+  // rather than absent - so the fold has to evaluate the shim's single half at
+  // zero itself. Three tensors, one row of arithmetic, once.
+  const shim = {};
+  for (const name of [...SHIM_PAIR_TENSORS, "lm/norm/offset", "lm/projection/weights",
+                      "lm/downproject/weights", "lm/downproject/bias"]) {
+    shim[name] = await tower.read(name);
+  }
+  const weightsAt = performance.now();
+  const [featuriser, inputsEmbedder, denoiser, encoder, decoder] = await Promise.all([
+    featuriserWeights(fold.read),
+    atomEncoderWeights(fold.read, "atom", M.atomBlocks),
+    denoiserWeights(fold.read, { tokenBlocks: M.tokenBlocks }),
+    atomEncoderWeights(fold.read, "diffusionAtomEncoder", M.atomBlocks,
+                       { withCoordinates: true }),
+    atomDecoderWeights(fold.read, "diffusionAtomDecoder", M.atomBlocks),
+  ]);
+  denoiser.encoder = encoder;
+  denoiser.decoder = decoder;
+  const denoiserWeightMs = Math.round(performance.now() - weightsAt);
+  const trunkBlocksAt = performance.now();
+  const trunkBlocks = [];
+  for (let layer = 0; layer < M.blocks; layer += 1) {
+    trunkBlocks.push(await trunkBlockWeights(fold.read, layer));
+  }
+  // 🔴 ABSENT IS NOT AN ERROR. A bundle exported without `--confidence` is what
+  // biohub ships and what every EF2 number in these docs was taken on; the head
+  // is an addition, so this returns null and the fold keeps `alignedError`.
+  const confidenceWeights = await confidenceHeadWeights(fold.read, manifest);
+  {
+  }
+  const trunkBlockMs = Math.round(performance.now() - trunkBlocksAt);
+
+  // 🔴 THE TOWER STREAMS ITS BLOCKS AND THIS MUST NOT DEFEAT THAT. Reading all
+  // 36 up front is 2190 MiB of float32 in the tab, which is the thing the
+  // streaming design exists to avoid.
+  const towerShared = {};
+  for (const name of TOWER_SHARED) towerShared[name] = await tower.read(name);
+  const allocator = new GpuBufferAllocator(device);
+  const runTower = async (ids, sequenceId, onBlock) => {
+    const engine = new EsmcTowerGpu(device, allocator);
+    const result = await engine.run(ids, {
+      rows: ids.length, model: towerManifest.width,
+      heads: towerManifest.heads ?? towerManifest.width / 64,
+      ffn: towerTable.tensors["blocks/0/fc2/weights"].shape[0],
+      layers: towerManifest.layers, pair: M.pairChannels,
+      residualScale: towerManifest.residualScale ?? 1,
+    }, async (layer) => {
+      // 🔴 THE FOUR NARROW LEAVES ARE OFFERED AS CODES AND DECODED ON DEMAND.
+      // `sources` lets the tower decode them on the device; the getters are the
+      // fallback for a bundle the device decoder cannot take, and they must be
+      // getters rather than values or the decode this exists to skip happens
+      // anyway. The six vectors are norms and stay eager - they are 0.4% of a
+      // block.
+      // 🔴 `--host-decode` IS THE ARM, and it exists because a device path with
+      // no host path beside it is a path nothing can be compared against.
+      const weights = args.includes("--host-decode") ? {} : { sources: {} };
+      for (const leaf of BLOCK_LEAVES) {
+        const name = `blocks/${layer}/${leaf}`;
+        if (!NARROW_LEAVES.has(leaf)) {
+          weights[leaf] = await tower.read(name, false);
+          continue;
+        }
+        const source = await tower.source(name);
+        if (weights.sources !== undefined) weights.sources[leaf] = source;
+        let decoded;
+        Object.defineProperty(weights, leaf, {
+          enumerable: true,
+          get() {
+            return (decoded ??= readTensorAsFloat16(
+              source.record, source.buffer, source.byteOffset));
+          },
+        });
+      }
+      return weights;
+    // 🔴 `towerShared` IS THE MODEL, AND THAT IS WHAT KEYS THE RESIDENCY. The
+    // tower is constructed fresh per fold and cannot be the key; this object is
+    // built once from the bundle and lives as long as it does. See
+    // residentBlocks in webgpu/esmc/tower.js.
+    }, towerShared, { sequenceId, onBlock, weightKey: towerShared });
+    return result.single;
+  };
+
+  // 🔴 ONE BUILDER FOR THREE CALL SITES. This literal was written out three
+  // times, and a key absent from one of them is a key thrown away on whichever
+  // path took it - which is exactly how `modifications` went missing in
+  // web/app.js. CLAUDE.md's allow-list trap; forward the object.
+  const entitiesFor = () =>
+    (kinds === "" && ligands.length === 0 && modifications.length === 0)
+      ? sequence
+      : { sequence,
+          ...(kinds === "" ? {} : { chainKinds: kinds.split(",") }),
+          ...(ligands.length === 0 ? {} : { ligands }),
+          ...(modifications.length === 0 ? {} : { modifications }) };
+
+  const ligands = [];
+  for (const code of ligandCodes) {
+    const text = await (await fetch(ccdUrl(code))).text();
+    ligands.push(parseCcdComponent(text));
+  }
+  const smilesNames = nameSmilesLigands(smilesList);
+  for (const [i, text] of smilesList.entries()) ligands.push(await smilesComponent(text, { code: smilesNames[i] }));
+  // ...and a modified residue's component from the same place, for the reason
+  // web/af3-model.js gives: the featuriser is synchronous, so a CODE has to
+  // become ATOMS before it is called.
+  const conformers = modifySpec === "" ? null
+    : await (await fetch("/tools/oracle/reference-conformers.json")).json();
+  const modifications = [];
+  for (const piece of modifySpec.split(",").filter((one) => one !== "")) {
+    const [code, position] = piece.split("@");
+    const text = await (await fetch(ccdUrl(code.toUpperCase()))).text();
+    modifications.push({ chain: 0, position: Number(position),
+                         ...parseCcdComponent(text) });
+  }
+
+  const progress = [];
+  const updates = new Map();
+  // 🔴 `--buffers` BECAUSE A FIRST FOLD IS 8 SECONDS AND A SECOND IS 0.85, and
+  // nothing here could say which side of the bus the difference was on. It
+  // wraps the device rather than the kernels; see tools/gpu/buffer-profile.js.
+  const buffers = args.includes("--buffers") ? profileBuffers(device) : null;
+  // --compare-lm=<url>: a native port's language-model pair (EF2_SAVE_LMZ, raw float32 [T, T, P]) against this one
+  const compareLm = option(args, "compare-lm", "");
+  // --compare-zi=<url> / --compare-pair=<url>: z_init (+ "<url>.s": s_inputs) and the trunk's pair against a native port's
+  const fetchF32 = async (u) => new Float32Array(await (await fetch(u)).arrayBuffer());
+  const relRms = (a, b) => { let e = 0, n = 0; for (let i = 0; i < a.length; i += 1) { const d = a[i] - b[i]; e += d * d; n += a[i] * a[i]; }
+    return Math.sqrt(e / n).toExponential(3) + ` (${a.length} against ${b.length})`; };
+  const nativeLm = compareLm === "" ? null : new Float32Array(await (await fetch(compareLm)).arrayBuffer());
+  const cmpZi = option(args, "compare-zi", ""), cmpPair = option(args, "compare-pair", "");
+  // --dump-denoise=<step>: that denoiser call's level, input and output, in the report (a native port replays them)
+  const dumpDenoiseStep = option(args, "dump-denoise", "");
+  let denoiseDump = null;
+  const result = await foldEsmfold2(device, {
+    ...(dumpDenoiseStep === "" ? {} : { onDenoise: (step, noisy, denoised, tHat) => {
+      if (step === Number(dumpDenoiseStep)) denoiseDump = { step, tHat, noisy: Array.from(noisy), denoised: Array.from(denoised) };
+    } }),
+    ...(cmpZi === "" ? {} : { onZInit: async (z) => console.log(`z_init against ${cmpZi}: relRMS ${relRms(z, await fetchF32(cmpZi))}`) }),
+    ...(cmpPair === "" ? {} : { onTrunkPair: async (z) => console.log(`trunk pair against ${cmpPair}: relRMS ${relRms(z, await fetchF32(cmpPair))}`) }),
+    ...(nativeLm === null ? {} : { onLanguagePair: (pair) => {
+      let err = 0, nrm = 0;
+      for (let i = 0; i < pair.length; i += 1) { const d = pair[i] - nativeLm[i]; err += d * d; nrm += pair[i] * pair[i]; }
+      console.log(`language pair against ${compareLm}: relRMS ${Math.sqrt(err / nrm).toExponential(3)}`
+        + ` (${pair.length} against ${nativeLm.length} values)`);
+    } }),
+    sequence, allocator, seed, sampler, samplerOverrides,
+    ...(denoiserWeightElement === "" ? {} : { denoiserWeightPrecision: denoiserWeightElement }),
+    entities: entitiesFor(),
+    shape: { ...M, loops: recycles + 1 },
+    submissionWindow,
+    trunk: {
+      ...(trunkWeights === "" ? {} : { weightPrecision: trunkWeights }),
+      ...(trunkPrecision === "" ? {} : {
+        stagedPrecision: trunkPrecision.split(":")[0],
+        accumulatePrecision: trunkPrecision.split(":")[1] ?? trunkPrecision.split(":")[0],
+      }),
+    },
+    weights: { featuriser, inputsEmbedder, trunkBlocks, denoiser, shim },
+    confidenceWeights,
+    // 🔴 THE HEAD'S INPUTS, FOR check-esmfold2-confidence-real.py. Only when
+    // asked: the pair is tokens^2 x 256 floats and this returns it as JSON.
+    returnConfidenceInputs: option(args, "confidence-inputs", "") !== "",
+    // 🔴 THE ATOM TRANSFORMER'S ARITHMETIC, WHICH DEFAULTS TO bf16. Their
+    // inputs embedder runs under `torch.amp.autocast(bfloat16)` on CUDA and in
+    // f32 without it, so a comparison against a CPU reference is comparing two
+    // precisions unless this says which. See docs/EF2FAST.md.
+    ...(option(args, "atom-windowed", "") === "" ? {} : { atomWindowed: true }),
+    ...(option(args, "atom-blocks", "") === ""
+      ? {} : { atomBlocks: Number(option(args, "atom-blocks", "")) }),
+    ...(option(args, "attention-precision", "") === ""
+      ? {} : { attentionPrecision: option(args, "attention-precision", "") }),
+    tower: runTower,
+    distogramLogits: contactSweep,
+    // ...measured and not drawn; see shared/esmfold2/aligned-error.js.
+    alignedError: true,
+    lmMaskFraction: lmMask,
+    languageModel: !noPlm,
+    wantReusable: twice,
+    // ...the band the bar gives the tower is its bytes; see webgpu/esmfold2/cost.js.
+    languageModelMiB: Object.values((await tower.manifest()).tensors)
+      .reduce((sum, record) => sum + tensorByteLength(record), 0) / 1048576,
+    onStatus: (label) => { progress.push(label); },
+    // 🔴 COUNTED PER PHASE, because "does the trunk report block by block" is a
+    // number and not an impression. A bar sampled from the page cannot answer
+    // it: 96 block updates inside two seconds are far more frequent than any
+    // poll, so the trace shows a handful of values whatever the code does.
+    onProgress: () => {
+      const phase = progress[progress.length - 1]?.split(" · ")[0] ?? "?";
+      updates.set(phase, (updates.get(phase) ?? 0) + 1);
+    },
+  });
+  if (denoiseDump !== null) console.log("DENOISE_DUMP " + JSON.stringify(denoiseDump));
+  if (cmpZi !== "") console.log(`s_inputs against ${cmpZi}.s: relRMS ${relRms(result.sInputs, await fetchF32(cmpZi + ".s"))}`);
+
+  if (buffers !== null) {
+    const traffic = buffers.report();
+    const wall = result.elapsedMilliseconds;
+    console.log(`buffer traffic: ${traffic.totalMs.toFixed(0)} ms of ${wall.toFixed(0)} ms wall`
+      + ` (${(100 * traffic.totalMs / wall).toFixed(0)}%)`);
+    console.log(`  queue drain: ${traffic.queueWait.unionMs.toFixed(0)} ms over `
+      + `${traffic.queueWait.calls} onSubmittedWorkDone, union not sum`);
+    for (const row of traffic.byKind) {
+      console.log(`  ${row.ms.toFixed(0).padStart(6)} ms`
+        + ` ${(100 * row.ms / wall).toFixed(1).padStart(5)}%`
+        + ` x${String(row.calls).padEnd(6)}`
+        + ` ${(row.bytes / (1024 * 1024)).toFixed(1).padStart(9)} MiB  ${row.kind}`);
+    }
+    for (const row of traffic.rows.slice(0, 12)) {
+      console.log(`    ${row.ms.toFixed(0).padStart(6)} ms x${String(row.calls).padEnd(6)}`
+        + ` ${(row.bytes / (1024 * 1024)).toFixed(1).padStart(9)} MiB  ${row.kind} ${row.label}`);
+    }
+    buffers.restore();
+  }
+
+  // ...and again off the cached trunk, which must agree to the digit.
+  let second;
+  if (twice) {
+    second = await foldEsmfold2(device, {
+      sequence, allocator, seed, sampler, samplerOverrides,
+      ...(denoiserWeightElement === "" ? {} : { denoiserWeightPrecision: denoiserWeightElement }),
+      entities: entitiesFor(),
+      shape: { ...M, loops: recycles + 1 },
+      submissionWindow,
+      weights: { featuriser, inputsEmbedder, trunkBlocks, denoiser, shim },
+      tower: runTower,
+      languageModel: !noPlm,
+      reuse: result.reusable,
+    });
+  }
+
+  const repeats = [];
+  // --profile times every labelled pass of the LAST repeat (a warm fold), one pass a dispatch.
+  const profile = args.includes("--profile") ? profileDevice(device) : null;
+  for (let again = 1; again < repeat; again += 1) {
+    if (profile !== null && again === repeat - 1) profile.reset();
+    const started = performance.now();
+    const other = await foldEsmfold2(device, {
+      sequence, allocator, seed, sampler, samplerOverrides,
+      ...(denoiserWeightElement === "" ? {} : { denoiserWeightPrecision: denoiserWeightElement }),
+      entities: entitiesFor(),
+      shape: { ...M, loops: recycles + 1 },
+      submissionWindow,
+      trunk: {
+        ...(trunkWeights === "" ? {} : { weightPrecision: trunkWeights }),
+        ...(trunkPrecision === "" ? {} : {
+          stagedPrecision: trunkPrecision.split(":")[0],
+          accumulatePrecision: trunkPrecision.split(":")[1] ?? trunkPrecision.split(":")[0],
+        }),
+      },
+      weights: { featuriser, inputsEmbedder, trunkBlocks, denoiser, shim },
+      // 🔴 AND THE CONFIDENCE HEAD, WHICH THE PAGE RUNS ON EVERY FOLD. This
+      // literal named everything the first fold passes except this, so every
+      // "warm" figure it printed left out a stage that is ~1.3 s at 255 tokens -
+      // the allow-list trap, measured on the tool instead of the page.
+      confidenceWeights,
+      tower: runTower,
+      languageModel: !noPlm,
+      lmMaskFraction: lmMask,
+    });
+    // 🔴 AND WHAT IT FOLDED, NOT JUST HOW LONG IT TOOK. A repeat exists to
+    // price the weight residency, and residency that returned a different
+    // structure would be invisible in a stopwatch. The alpha carbons are
+    // compared to the first fold's, which is the same sequence and the same
+    // seed and so must be the same fold to the bit.
+    const carbons = (fold) => Array.from(fold.alphaCarbons ?? []);
+    const first = carbons(result);
+    const mine = carbons(other);
+    let worst = 0;
+    for (let i = 0; i < Math.min(first.length, mine.length); i += 1) {
+      worst = Math.max(worst, Math.abs(first[i] - mine[i]));
+    }
+    repeats.push({
+      seconds: Number(((performance.now() - started) / 1000).toFixed(3)),
+      languageModelMs: Math.round(other.timings?.["language model"] ?? -1),
+      // ...and the whole breakdown, because a repeat is the only place the
+      // steady-state cost of each stage is visible: a first fold's numbers are
+      // all compilation and first touch.
+      timings: Object.fromEntries(Object.entries(other.timings ?? {})
+        .map(([k, v]) => [k, Math.round(v)])),
+      alphaCarbons: mine.length,
+      worstDisplacement: worst,
+      sameFold: mine.length === first.length && worst === 0,
+    });
+    if (mine.length !== first.length || worst !== 0) {
+      throw new Error(`fold ${again + 1} differs from the first by ${worst} A;`
+        + " the same sequence at the same seed must fold identically");
+    }
+  }
+
+  // 🔴 THE pAE, WHICH THIS CHECKPOINT HAS NO HEAD FOR. Reported as a summary
+  // rather than a matrix - the matrix is tokens^2 and belongs in the archive -
+  // and named for what it is: a predicted aligned error read off the distogram,
+  // fitted against AlphaFold 3's own. See shared/esmfold2/aligned-error.js.
+  const pae = result.alignedError;
+  let alignedError;
+  if (pae !== undefined) {
+    const n = result.tokens;
+    const off = [];
+    for (let i = 0; i < n; i += 1) {
+      for (let j = 0; j < n; j += 1) if (i !== j) off.push(pae[i * n + j]);
+    }
+    off.sort((a, b) => a - b);
+    alignedError = {
+      mean: Number((off.reduce((s2, v) => s2 + v, 0) / off.length).toFixed(3)),
+      median: Number(off[off.length >> 1].toFixed(3)),
+      min: Number(off[0].toFixed(3)),
+      max: Number(off[off.length - 1].toFixed(3)),
+      // 🔴 THE SUMMARY IS THE LEAST USEFUL READING OF IT, and is printed only
+      // so a shell run can see the estimate exists. It orders pairs WITHIN a
+      // fold (0.746) and is nearly constant BETWEEN folds (Spearman 0.117), so
+      // a mean is close to meaningless - see aligned-error.js. The map is what
+      // carries the information.
+      note: "orders pairs within this fold; the mean does not compare across folds",
+    };
+  }
+
+  // ---- what came out.
+  const alphas = alphaCarbons(result.features);
+  const x = result.coordinates;
+  // 🔴 THE SPACING IS WITHIN A CHAIN, NOT ALONG THE ARRAY. Two chains are two
+  // molecules and the distance across the break is whatever the sampler placed
+  // them at - 22.9 A on the first complex run here, which read as a broken fold
+  // and is the metric walking off the end of chain one.
+  const chainOfAtom = result.features.asymId;
+  const tokenOfAtom = result.features.atomToToken;
+  const spacing = [];
+  for (let i = 1; i < alphas.length; i += 1) {
+    const previous = alphas[i - 1], atom = alphas[i];
+    if (chainOfAtom[tokenOfAtom[previous]] !== chainOfAtom[tokenOfAtom[atom]]) continue;
+    const a = previous * 3, b = atom * 3;
+    spacing.push(Math.hypot(x[b] - x[a], x[b + 1] - x[a + 1], x[b + 2] - x[a + 2]));
+  }
+  const mean = spacing.length === 0 ? NaN
+    : spacing.reduce((t, v) => t + v, 0) / spacing.length;
+  // 🔴 AND THE SPACING IS A GATE NOW, NOT A REPORT. It was reported "instead of
+  // the RNG" precisely because it is the number that says whether this is a
+  // chain, and nothing failed on it - the state fold-af2.js was in when an
+  // 825-residue collapse passed for a whole campaign. The MEAN is not what is
+  // gated: one link thrown across the box moves a mean by a residue's worth and
+  // a median not at all, so the rule takes both the median and the worst. See
+  // tools/gpu/chain-geometry.js.
+  //
+  // 🔴 A NUCLEIC-ONLY FOLD HAS NO ALPHA CARBONS and the verdict says so rather
+  // than passing on a NaN comparison; the phosphodiester distance below is that
+  // chain's equivalent statement and is still reported, not gated.
+  const chainGeometry = chainGeometryOf(spacing);
+  assertChainGeometry(chainGeometry, {
+    doc: "docs/EF2FAST.md and docs/AF2.md",
+    allow: args.includes("--allow-broken-geometry"),
+  });
+  // 🔴 A NUCLEIC CHAIN'S GEOMETRY GATE IS THE PHOSPHODIESTER BOND, NOT CA-CA.
+  // O3' of one nucleotide to P of the next is about 1.6 A, and it is the same
+  // kind of statement 3.8 A is for a peptide: a covalent distance no torsion
+  // can change, which a port with the arithmetic subtly wrong gets wrong.
+  const named = (atom, text) => {
+    const chars = result.features.refAtomNameChars;
+    for (let i = 0; i < 4; i += 1) {
+      const wanted = i < text.length ? text.charCodeAt(i) - 32 : 0;
+      if (chars[atom * 4 + i] !== wanted) return false;
+    }
+    return true;
+  };
+  const phosphodiester = [];
+  for (let atom = 1; atom < result.atoms; atom += 1) {
+    if (!named(atom, "P")) continue;
+    for (let back = atom - 1; back >= 0 && back > atom - 30; back -= 1) {
+      if (!named(back, "O3'")) continue;
+      const token = result.features.atomToToken;
+      if (result.features.asymId[token[back]] !== result.features.asymId[token[atom]]) break;
+      phosphodiester.push(Math.hypot(x[atom * 3] - x[back * 3],
+        x[atom * 3 + 1] - x[back * 3 + 1], x[atom * 3 + 2] - x[back * 3 + 2]));
+      break;
+    }
+  }
+  let rmsd;
+  if (reference !== "") {
+    const dump = await (await fetch(reference)).json();
+    const native = Float32Array.from(dump.coordinates);
+    if (native.length !== x.length) {
+      throw new Error(`${reference} has ${native.length / 3} atoms for ${result.atoms}`);
+    }
+    const aligned = weightedRigidAlign(x, native, result.features.mask, result.atoms);
+    let squared = 0, live = 0;
+    for (let atom = 0; atom < result.atoms; atom += 1) {
+      if (result.features.mask[atom] === 0) continue;
+      live += 1;
+      for (let axis = 0; axis < 3; axis += 1) {
+        const d = aligned[atom * 3 + axis] - native[atom * 3 + axis];
+        squared += d * d;
+      }
+    }
+    rmsd = Math.sqrt(squared / live);
+  }
+  // 🔴 THE STRUCTURE GOES THROUGH AF3's WRITER, NOT A SECOND ONE. `toPdb`
+  // already knows a ligand is HETATM under its component's code, that a
+  // nucleotide is " DA" rather than "ALA", that a modified residue takes its
+  // own code, and that a complex needs one chain letter per asym id. Permuting
+  // the coordinates back into its dense layout is cheaper than any of that.
+  const pdb = toPdb(result.features.batch, toDensePositions(result.features, x));
+
+  // 🔴 THE DISTOGRAM AND THE STRUCTURE ARE TWO INDEPENDENT READINGS OF ONE
+  // TRUNK, so their agreement is a gate neither can give alone. The distogram
+  // head is a single projection off the pair; the coordinates came through the
+  // conditioning, twelve token blocks, two atom stacks and a stochastic
+  // sampler. If the borrowed bin edges were badly wrong, or either head were
+  // mis-wired, the two would not agree - and a fold can be geometrically
+  // perfect while being the wrong fold, which CA-CA cannot see.
+  let contactPairs = 0;
+  let agreement;
+  // 🔴 THE REPRESENTATIVE ATOM AND THE PARTNER RULE ARE SHARED, because the
+  // threshold sweep below scores the same pairs this does. Two copies of a
+  // pseudo-beta rule is two chances to disagree with the distogram's own
+  // convention, and a comparison against the wrong representative compares
+  // nothing.
+  const representative = new Int32Array(result.tokens).fill(-1);
+  const { molType, asymId, residueIndex } = result.features;
+  const ligand = (t) => molType[t] === 3;
+  // ...the same rule the certainty uses, and for the same reason: a separation
+  // on the TOKEN index is a rule about a chain's neighbours, and a ligand's
+  // atoms are neither.
+  const neighbours = (i, j) => asymId[i] === asymId[j]
+    && Math.abs(residueIndex[i] - residueIndex[j]) <= 6;
+  // ...and the OBSERVED side takes the same per-kind threshold the contact map
+  // does, or the two halves of a precision are answering different questions.
+  const KIND = ["protein", "nucleic", "nucleic", "ligand"];
+  const { residueType } = result.features;
+  const cutoff = (i, j) => contactAngstromsFor(molType[i], molType[j],
+                                               residueType[i], residueType[j]);
+  if (result.contacts !== undefined) {
+    for (let atom = 0; atom < result.atoms; atom += 1) {
+      if (result.features.mask[atom] === 0) continue;
+      const token = result.features.atomToToken[atom];
+      // CB where there is one, else CA, else the token's first atom - which is
+      // the usual pseudo-beta rule and what a ligand token has anyway.
+      if (representative[token] < 0) representative[token] = atom;
+      if (named(atom, "CB")) representative[token] = atom;
+      else if (named(atom, "CA") && !named(representative[token], "CB")) {
+        representative[token] = atom;
+      }
+    }
+    let both = 0, predicted = 0, actual = 0;
+    // 🔴 SPLIT BY WHAT THE PAIR IS, because a ligand is ONE TOKEN PER HEAVY
+    // ATOM: its atoms are all within a few angstroms of each other, so every
+    // one of its k^2 self-pairs is "in contact" and says nothing, and `j >= i +
+    // 6` - a rule about a chain's own neighbours - excludes an arbitrary
+    // prefix of them rather than a sequence neighbourhood. Counted rather than
+    // argued: `kinds` is polymer/polymer, polymer/ligand, ligand/ligand and
+    // each ligand's own self-pairs.
+    // ...the same six names `tools/calibrate-contact-cutoff.py` reports, so the
+    // fold's numbers and the calibration's are read side by side.
+    const kinds = {};
+    const bucketFor = (i, j) => {
+      const name = [KIND[molType[i]], KIND[molType[j]]].sort().join("-");
+      if (kinds[name] === undefined) {
+        // ...no `cutoff` field: a ligand-protein pair's threshold is the
+        // RESIDUE's, so one number here would be whichever pair came first.
+        kinds[name] = { predicted: 0, actual: 0, both: 0,
+                        probability: { max: 0, sum: 0, n: 0 } };
+      }
+      return kinds[name];
+    };
+    for (let i = 0; i < result.tokens; i += 1) {
+      for (let j = i + 1; j < result.tokens; j += 1) {
+        if (neighbours(i, j)) continue;
+        const near = result.contacts[i * result.tokens + j] > 0.5;
+        if (near) contactPairs += 1;
+        const a = representative[i] * 3, b = representative[j] * 3;
+        const close = Math.hypot(x[b] - x[a], x[b + 1] - x[a + 1],
+                                 x[b + 2] - x[a + 2]) < cutoff(i, j);
+        if (near) predicted += 1;
+        if (close) actual += 1;
+        if (near && close) both += 1;
+        const bucket = bucketFor(i, j);
+        // ...and what the MAP actually says, which is a probability and not a
+        // yes. "Zero predicted contacts" is a statement about the 0.5 cut, not
+        // about the head, and the panel draws the probability itself.
+        const p = result.contacts[i * result.tokens + j];
+        bucket.probability.max = Math.max(bucket.probability.max, p);
+        bucket.probability.sum += p;
+        bucket.probability.n += 1;
+        if (near) bucket.predicted += 1;
+        if (close) bucket.actual += 1;
+        if (near && close) bucket.both += 1;
+      }
+    }
+    // ...and how many pairs the separation rule DROPS inside one ligand, which
+    // is the other half of the objection: for a polymer those are real
+    // neighbours, for a ligand they are an arbitrary third of the molecule.
+    let ligandTokens = 0, ligandPairsKept = 0, ligandPairsDropped = 0;
+    for (let i = 0; i < result.tokens; i += 1) {
+      if (!ligand(i)) continue;
+      ligandTokens += 1;
+      for (let j = i + 1; j < result.tokens; j += 1) {
+        if (!ligand(j) || asymId[i] !== asymId[j]) continue;
+        if (neighbours(i, j)) ligandPairsDropped += 1; else ligandPairsKept += 1;
+      }
+    }
+    agreement = { predicted, actual, both,
+                  precision: predicted === 0 ? null : both / predicted,
+                  recall: actual === 0 ? null : both / actual,
+                  kinds, ligandTokens, ligandPairsKept, ligandPairsDropped };
+  }
+
+  // 🔴 THE THRESHOLD, SWEPT PER KIND, plus whether the head predicts a DISTANCE
+  // for the pairs at all - which is the question a threshold cannot answer. A
+  // head that says nothing about protein-ligand pairs gives a flat correlation
+  // at every threshold, and one whose threshold is merely wrong does not.
+  let sweep;
+  if (contactSweep && result.distogram !== undefined) {
+    const { logits, bias } = result.distogram;
+    const bins = bias.length;
+    const width = (CONTACT_EDGES.maximum - CONTACT_EDGES.minimum) / bins;
+    const centre = (bin) => CONTACT_EDGES.minimum + (bin + 0.5) * width;
+    const thresholds = [4, 5, 6, 8, 10, 12];
+    const blank = () => ({ pairs: 0, sums: { x: 0, y: 0, xx: 0, yy: 0, xy: 0 },
+      estimators: { mode: [], mean: [], median: [] },
+      fit: { n: 0, x: 0, y: 0, xx: 0, yy: 0, xy: 0 },
+      at: Object.fromEntries(thresholds.map((t) =>
+        [t, { predicted: 0, actual: 0, both: 0 }])) });
+    const buckets = {};
+    const probability = new Float64Array(bins);
+    for (let i = 0; i < result.tokens; i += 1) {
+      for (let j = i + 1; j < result.tokens; j += 1) {
+        // 🔴 THE SWEEP KEEPS THE PAIRS THE CERTAINTY DROPS, because this is
+        // asking what the HEAD knows and not what a score should average. A
+        // ligand's own atoms are the one set of distances the model was HANDED
+        // - `ref_pos` carries the conformer - so how well it predicts them says
+        // whether it can read a ligand at all, which is the control for whether
+        // its protein-ligand answers mean anything.
+        const trivial = neighbours(i, j);
+        const same = [KIND[molType[i]], KIND[molType[j]]].sort().join("-");
+        const name = trivial
+          ? (molType[i] === 3 && molType[j] === 3 ? "ligand-intra" : "sequence-neighbour")
+          : same;
+        if (buckets[name] === undefined) buckets[name] = blank();
+        const bucket = buckets[name];
+        // ...the head symmetrises, so the pair is read once.
+        const base = (i * result.tokens + j) * bins;
+        let peak = -Infinity;
+        for (let bin = 0; bin < bins; bin += 1) {
+          const value = logits[base + bin] + bias[bin];
+          probability[bin] = value;
+          if (value > peak) peak = value;
+        }
+        let total = 0;
+        for (let bin = 0; bin < bins; bin += 1) {
+          probability[bin] = Math.exp(probability[bin] - peak);
+          total += probability[bin];
+        }
+        // 🔴 THREE READINGS OF ONE DISTRIBUTION, because the mode is not the
+        // only one and a skewed distribution's argmax is not its centre of
+        // mass. `mode` is the bin the model likes best, `mean` its expectation
+        // over the grid, `median` the half-mass point - and which of them a
+        // contact threshold should be applied to is a question the numbers can
+        // answer rather than a convention to inherit.
+        let mode = 0, best = -1, mean = 0, median = -1, run = 0;
+        for (let bin = 0; bin < bins; bin += 1) {
+          probability[bin] /= total;
+          if (probability[bin] > best) { best = probability[bin]; mode = bin; }
+          mean += probability[bin] * centre(bin);
+          run += probability[bin];
+          if (median < 0 && run >= 0.5) median = centre(bin);
+        }
+        const a = representative[i] * 3, b = representative[j] * 3;
+        const observed = Math.hypot(x[b] - x[a], x[b + 1] - x[a + 1], x[b + 2] - x[a + 2]);
+        const predictedDistance = centre(mode);
+        // 🔴 AND THE BIN GRID ITSELF IS FITTED, NOT ASSUMED. `CONTACT_EDGES` is
+        // borrowed from the DISABLED confidence head - 2 to 52 over 128 bins -
+        // and nothing has ever checked it against a distance. A predicted
+        // distance is linear in the bin index, so regressing the OBSERVED
+        // distance on the expected bin index recovers the grid the head was
+        // trained with: the intercept is the first bin's centre and the slope
+        // is the bin width. Protein-protein pairs are the ones to fit on, at
+        // r = 0.999.
+        let meanBin = 0;
+        for (let bin = 0; bin < bins; bin += 1) meanBin += probability[bin] * bin;
+        bucket.fit.n += 1;
+        bucket.fit.x += meanBin;
+        bucket.fit.y += observed;
+        bucket.fit.xx += meanBin * meanBin;
+        bucket.fit.yy += observed * observed;
+        bucket.fit.xy += meanBin * observed;
+        bucket.estimators.mode.push(predictedDistance - observed);
+        bucket.estimators.mean.push(mean - observed);
+        bucket.estimators.median.push(median - observed);
+        bucket.pairs += 1;
+        bucket.sums.x += predictedDistance;
+        bucket.sums.y += observed;
+        bucket.sums.xx += predictedDistance * predictedDistance;
+        bucket.sums.yy += observed * observed;
+        bucket.sums.xy += predictedDistance * observed;
+        for (const threshold of thresholds) {
+          let mass = 0;
+          for (let bin = 0; bin < bins; bin += 1) {
+            if (centre(bin) < threshold) mass += probability[bin];
+          }
+          const cell = bucket.at[threshold];
+          if (mass > 0.5) cell.predicted += 1;
+          if (observed < threshold) cell.actual += 1;
+          if (mass > 0.5 && observed < threshold) cell.both += 1;
+        }
+      }
+    }
+    sweep = Object.fromEntries(Object.entries(buckets)
+      .filter(([, v]) => v.pairs > 0)
+      .map(([name, v]) => {
+        const n = v.pairs, { x: sx, y: sy, xx, yy, xy } = v.sums;
+        const denominator = Math.sqrt((n * xx - sx * sx) * (n * yy - sy * sy));
+        const spread = (values) => {
+          const bias = values.reduce((t, v) => t + v, 0) / values.length;
+          const rms = Math.sqrt(values.reduce((t, v) => t + v * v, 0) / values.length);
+          return { bias: Number(bias.toFixed(2)), rms: Number(rms.toFixed(2)) };
+        };
+        // 🔴 REGRESSED THE OTHER WAY ROUND, because the noise is in the
+        // PREDICTION and not in the distance. Fitting observed-on-predicted
+        // attenuates the slope by the predictor's noise - classic regression
+        // dilution - and reads a grid finer than the real one. The observed
+        // distance is a measured coordinate; the expected bin is the model's
+        // guess, so `bin = a + b * distance` is the direction that is not
+        // biased, and the grid is its inverse.
+        const f = v.fit;
+        const denom = f.n * f.yy - f.y * f.y;
+        const perAngstrom = denom === 0 ? null : (f.n * f.xy - f.x * f.y) / denom;
+        const slope = perAngstrom === null || perAngstrom === 0 ? null : 1 / perAngstrom;
+        const intercept = slope === null ? null
+          : -((f.x - perAngstrom * f.y) / f.n) * slope;
+        return [name, {
+          pairs: n,
+          grid: slope === null ? null : {
+            firstBinCentre: Number(intercept.toFixed(3)),
+            binWidth: Number(slope.toFixed(4)),
+            impliedRange: [Number((intercept - slope / 2).toFixed(2)),
+                           Number((intercept - slope / 2 + slope * 128).toFixed(2))],
+          },
+          estimators: Object.fromEntries(Object.entries(v.estimators)
+            .map(([k, values]) => [k, spread(values)])),
+          meanPredicted: sx / n, meanObserved: sy / n,
+          distanceCorrelation: denominator === 0 ? null
+            : (n * xy - sx * sy) / denominator,
+          at: Object.fromEntries(Object.entries(v.at).map(([t, c]) => [t, {
+            ...c, precision: c.predicted === 0 ? null : c.both / c.predicted,
+            recall: c.actual === 0 ? null : c.both / c.actual }])),
+        }];
+      }));
+  }
+
+  // 🔴 THE CERTAINTY MIXES INTRA- AND INTER-CHAIN PARTNERS, AND NOTHING HAS
+  // EVER CHECKED WHETHER IT SHOULD. The shader excludes only same-chain
+  // SEQUENCE neighbours, so a residue on a complex is judged partly on pairs
+  // across the interface - and every target in the 11,400-arm sweep that chose
+  // its constants was a single protein chain. This recomputes it on the host
+  // three ways over the same distogram, which is the comparison that says
+  // whether the mixing changes the answer.
+  let certaintyByChain;
+  if (contactSweep && result.distogram !== undefined) {
+    const { logits, bias } = result.distogram;
+    const bins = bias.length;
+    const width = (CONTACT_EDGES.maximum - CONTACT_EDGES.minimum) / bins;
+    const centre = (bin) => CONTACT_EDGES.minimum + (bin + 0.5) * width;
+    const RADIUS = 2, SEPARATION = 3, CUTOFF = 12;
+    const n = result.tokens;
+    const probability = new Float64Array(bins);
+    // ...one pass over the pairs, three accumulators per token.
+    const arms = ["all", "intra", "inter"];
+    const sums = Object.fromEntries(arms.map((a) => [a, new Float64Array(n)]));
+    const counts = Object.fromEntries(arms.map((a) => [a, new Float64Array(n)]));
+    for (let i = 0; i < n; i += 1) {
+      for (let j = 0; j < n; j += 1) {
+        if (i === j) continue;
+        const sameChain = asymId[i] === asymId[j];
+        if (sameChain && Math.abs(residueIndex[i] - residueIndex[j]) <= SEPARATION) continue;
+        const base = (i * n + j) * bins;
+        let peak = -Infinity;
+        for (let bin = 0; bin < bins; bin += 1) {
+          const value = logits[base + bin] + bias[bin];
+          probability[bin] = value;
+          if (value > peak) peak = value;
+        }
+        let total = 0;
+        for (let bin = 0; bin < bins; bin += 1) {
+          probability[bin] = Math.exp(probability[bin] - peak);
+          total += probability[bin];
+        }
+        let mode = 0, best = -1;
+        for (let bin = 0; bin < bins; bin += 1) {
+          probability[bin] /= total;
+          if (probability[bin] > best) { best = probability[bin]; mode = bin; }
+        }
+        if (centre(mode) >= CUTOFF) continue;
+        let mass = 0;
+        for (let bin = 0; bin < bins; bin += 1) {
+          if (Math.abs(centre(bin) - centre(mode)) <= RADIUS) mass += probability[bin];
+        }
+        for (const arm of arms) {
+          if (arm === "intra" && !sameChain) continue;
+          if (arm === "inter" && sameChain) continue;
+          sums[arm][i] += mass;
+          counts[arm][i] += 1;
+        }
+      }
+    }
+    const chains = [...new Set(asymId)].sort((a, b) => a - b);
+    certaintyByChain = chains.map((chain) => {
+      const row = { chain, tokens: 0 };
+      for (const arm of arms) {
+        let sum = 0, seen = 0;
+        for (let i = 0; i < n; i += 1) {
+          if (asymId[i] !== chain || counts[arm][i] === 0) continue;
+          sum += sums[arm][i] / counts[arm][i];
+          seen += 1;
+        }
+        row[arm] = seen === 0 ? null : Number((sum / seen).toFixed(4));
+        if (arm === "all") row.tokens = seen;
+      }
+      return row;
+    });
+  }
+
+  return {
+    confidence: result.confidence === undefined ? undefined : (() => {
+      const c = result.confidence;
+      const mean = (v) => v.reduce((a, b) => a + b, 0) / v.length;
+      // 🔴 NOT `Math.min(...v)`. A spread passes every element as an ARGUMENT,
+      // so the PAE of a 472-residue fold - 222,784 of them - overflows the
+      // call stack with "Maximum call stack size exceeded" from a line that
+      // looks like arithmetic. It only ever ran on 59-token folds before.
+      const least = (v) => v.reduce((a, b) => (b < a ? b : a), Infinity);
+      const most = (v) => v.reduce((a, b) => (b > a ? b : a), -Infinity);
+      const n = Math.round(Math.sqrt(c.pae.length));
+      let asym = 0;
+      for (let i = 0; i < n; i += 1) {
+        for (let j = 0; j < n; j += 1) asym += Math.abs(c.pae[i * n + j] - c.pae[j * n + i]);
+      }
+      return {
+        meanPlddt: Number((mean(c.plddt) * 100).toFixed(3)),
+        minPlddt: Number((least(c.plddt) * 100).toFixed(2)),
+        maxPlddt: Number((most(c.plddt) * 100).toFixed(2)),
+        complexPlddt: Number((c.complexPlddt * 100).toFixed(3)),
+        paeMean: Number(mean(c.pae).toFixed(4)),
+        paeMin: Number(least(c.pae).toFixed(3)),
+        paeMax: Number(most(c.pae).toFixed(3)),
+        paeAsymmetry: Number((asym / c.pae.length / mean(c.pae)).toFixed(6)),
+        ptm: c.ptm === undefined ? undefined : Number(c.ptm.toFixed(6)),
+        iptm: c.iptm === undefined ? undefined : Number(c.iptm.toFixed(6)),
+        // AlphaFold 3's chain-level scores (esmfold2ChainScores), keyed by asym id
+        chainPtm: c.chainPtm, chainIptm: c.chainIptm, chainPairIptm: c.chainPairIptm,
+        // ...the arrays themselves only when the oracle arm asked for them.
+        ...(c.inputs === undefined ? {} : {
+          plddt: Array.from(c.plddt, (v) => Number(v.toFixed(6))),
+          paeAll: Array.from(c.pae, (v) => Number(v.toFixed(4))),
+          inputs: {
+            tokens: c.inputs.tokens, atoms: c.inputs.atoms,
+            pair: Array.from(c.inputs.pair, (v) => Number(v.toFixed(5))),
+            sInputs: Array.from(c.inputs.sInputs, (v) => Number(v.toFixed(5))),
+            coordinates: Array.from(c.inputs.coordinates, (v) => Number(v.toFixed(4))),
+            repAtom: Array.from(c.inputs.repAtom),
+            atomToToken: Array.from(c.inputs.atomToToken),
+            atomMask: Array.from(c.inputs.atomMask),
+            asymId: Array.from(c.inputs.asymId),
+            // 🔴 THE BISECT TENSORS ARE OPT-IN, because three pair-sized arrays
+            // do not fit in a JSON string: at 195 tokens each is 9.7M floats and
+            // the runner dies with "Invalid string length" - V8's limit, hit by
+            // the DUMP rather than by the fold. `=all` asks for them; `=1`
+            // carries what the head reads, and the encoding is rebuildable
+            // exactly from their own `rel_pos` (verified at 0.000e+00).
+            ...(option(args, "confidence-inputs", "") !== "all" ? {} : {
+              pairBias: Array.from(c.inputs.pairBias, (v) => Number(v.toFixed(5))),
+              ...Object.fromEntries(["refPos", "refCharge", "refElement",
+                "refAtomNameChars", "refSpaceUid", "aatype", "profile",
+                "deletionMean", "atomConditioning", "atomActivation", "zInit"]
+                .map((k) => [k, Array.from(c.inputs[k])])),
+            }),
+          },
+        }),
+      };
+    })(),
+    ...(profile === null ? {} : { profile: { dropped: profile.dropped(),
+      rows: (await profile.report()).sort((x, y) => y.ms - x.ms).slice(0, 30) } }),
+    sequence, sampler, seed, trunkPrecision, trunkWeights, repeats,
+    contactSweep: sweep, certaintyByChain,
+    lmMask: result.lmMask,
+    reuseCheck: second === undefined ? undefined : {
+      trunkReused: second.trunkReused,
+      firstSeconds: result.elapsedMilliseconds / 1000,
+      secondSeconds: second.elapsedMilliseconds / 1000,
+      sameCoordinates: [...result.coordinates].every((v, i) => v === second.coordinates[i]),
+    },
+    languageModel: result.languageModel,
+    // ...what the shipped shader now separates, so the host arm above and the
+    // kernel can be compared rather than trusted.
+    shippedByChain: result.interfaceCertainty === undefined ? undefined
+      : [...new Set(asymId)].sort((a, b) => a - b).map((chain) => {
+        const mean = (values, keep) => {
+          let sum = 0, seen = 0;
+          for (let t = 0; t < result.tokens; t += 1) {
+            if (asymId[t] !== chain || !keep(values[t])) continue;
+            sum += values[t]; seen += 1;
+          }
+          return seen === 0 ? null : Number((sum / seen).toFixed(4));
+        };
+        // ...`certainty` is over EVERY eligible partner, as AF3's lDDT is;
+        // `interface` is the cross-chain subset, which is a per-chain question
+        // rather than a per-residue one.
+        return { chain,
+          certainty: mean(result.certainty, (v) => v >= 0),
+          interface: mean(result.interfaceCertainty, (v) => v >= 0) };
+      }),
+    tokens: result.tokens, atoms: result.atoms, steps: result.steps,
+    alphaCarbons: alphas.length, alignedError,
+    // ...median and worst beside the mean, because those two are what the gate
+    // reads and a report that does not show what was gated is a report nobody
+    // can check. See tools/gpu/chain-geometry.js.
+    caSpacing: spacing.length === 0 ? null
+      : { mean, median: chainGeometry.caca, worst: chainGeometry.worstCaca,
+          min: Math.min(...spacing), max: Math.max(...spacing) },
+    phosphodiester: phosphodiester.length === 0 ? null : {
+      bonds: phosphodiester.length,
+      mean: phosphodiester.reduce((t, v) => t + v, 0) / phosphodiester.length,
+      min: Math.min(...phosphodiester), max: Math.max(...phosphodiester) },
+    rmsdToReference: rmsd,
+    // 🔴 THE FOLD'S CLOCK STARTS AFTER THE WEIGHTS ARE LOADED, and a user's
+    // does not. `weightSeconds` is the int5 decode of every bundle this tool
+    // opens, on the main thread, before `elapsedSeconds` begins.
+    weightSeconds: Number(((denoiserWeightMs + trunkBlockMs) / 1000).toFixed(3)),
+    weightSplit: { denoiser: denoiserWeightMs, trunkBlocks: trunkBlockMs },
+    elapsedSeconds: result.elapsedMilliseconds / 1000,
+    timings: result.timings,
+    // 🔴 THE ALLOCATOR'S PEAK IS NO LONGER THE DEVICE'S. Resident weights are
+    // created outside the pool - they have to outlive the run that made them -
+    // so `allocator.snapshot()` stopped counting the largest thing a fold
+    // holds: it read 344 MiB before the ESM-C tower and the denoiser kept
+    // theirs and 94 after, while the device held MORE. Both are reported now,
+    // and the device's is the one that answers "will this fit".
+    peakMebibytes: result.memory.peakBytes / 1048576,
+    devicePeakMebibytes: Number((memorySnapshot(device).peakBytes / 1048576).toFixed(1)),
+    // 🔴 AND GROUPED, BECAUSE TWENTY ROWS STOPPED REACHING THE ANSWER. With the
+    // pair tensors down, the peak is a long tail of per-block weight tensors -
+    // twelve token blocks times six tensors each - and no row-listing shows
+    // that a THIRD of the fold is the denoiser's parameters in float32. The
+    // group is what says which stage to price, the rows say which tensor.
+    peakGroups: (() => {
+      const groups = new Map();
+      for (const entry of memorySnapshot(device).peakByLabel) {
+        // 🔴 SPLIT THE WEIGHTS BY STACK, NOT BY TENSOR. Half a fold is
+        // `w.esmfold2.*` and the question a precision trade asks is which
+        // STACK it is in: the token transformer produces an activation a
+        // LayerNorm renormalises and the atom stacks produce a position
+        // update in angstroms, which nothing does. `b0.swish` and `b11.swish`
+        // are one stack, so the block index is stripped.
+        const key = entry.label.startsWith("w.esmfold2.")
+          ? `weights: ${entry.label.slice("w.esmfold2.".length).split(".")[0]
+              .replace(/\d+$/, "")}`
+          : entry.label.split(".").slice(0, 2).join(".");
+        groups.set(key, (groups.get(key) ?? 0) + entry.bytes);
+      }
+      return [...groups.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([label, bytes]) => ({ label, mib: Number((bytes / 1048576).toFixed(2)) }));
+    })(),
+    // 🔴 AND WHICH TENSOR IT IS, WHICH THE TOTAL CANNOT SAY. `peakByLabel` is
+    // what was on the DEVICE when it was fullest and its rows sum to the peak;
+    // `byLabel` sums every allocation a label ever made, so a scratch tensor
+    // taken and returned once a block reads as ninety-six times its size. AF3's
+    // fold.js and fold-af2.js have printed this for a long time and this tool
+    // did not, which is why a 92 MiB saving inside the trunk could be measured
+    // and its absence from the fold's peak could not be explained.
+    peakByLabel: memorySnapshot(device).peakByLabel.slice(0, 20).map((entry) => ({
+      label: entry.label,
+      mib: Number((entry.bytes / 1048576).toFixed(2)),
+      count: entry.count,
+    })),
+    stages: [...new Set(progress.map((p) => p.split(" · ")[0]))],
+    progressEvents: Object.fromEntries(updates),
+    longRangeContacts: contactPairs,
+    certainty: result.certainty === undefined ? undefined : {
+      mean: [...result.certainty].reduce((t, v) => t + v, 0) / result.certainty.length,
+      min: Math.min(...result.certainty), max: Math.max(...result.certainty),
+      // ...and split by what the token IS, plus the whole vector, because the
+      // question a ligand raises is whether it moves the POLYMER's numbers.
+      polymerMean: (() => {
+        const v = [...result.certainty].filter((_, t) => result.features.molType[t] !== 3);
+        return v.length === 0 ? null : v.reduce((a, b) => a + b, 0) / v.length;
+      })(),
+      ligandMean: (() => {
+        const v = [...result.certainty].filter((_, t) => result.features.molType[t] === 3);
+        return v.length === 0 ? null : v.reduce((a, b) => a + b, 0) / v.length;
+      })(),
+      perToken: [...result.certainty].map((v) => Number(v.toFixed(4))),
+    },
+    // 🔴 THE TWO NUMBERS `check-modified-path.mjs` READS, in the shape
+    // probe-modified.js already returns them, so the gate needs one extra row
+    // and no second contract. The CONTROL is mandatory and comes from the same
+    // structure: at a low step count every model's unmodified residues are bad
+    // too, and a modified-residue number without one measures nothing.
+    ...(modifications.length === 0 || conformers === null ? {} : (() => {
+      // 🔴 `tools/oracle/reference-conformers.json`, NOT src/'s table. The
+      // scorer wants each atom as `{name, pos}` and the src export is a
+      // different shape - passing it throws inside `idealBonds` on
+      // `atoms[i].pos`. Every other caller of bondGeometry fetches this file.
+      const scored = bondGeometry(pdb, conformers, {
+        components: new Map(modifications.map((one) => [one.code, one])),
+      });
+      return {
+        // A component with no conformer is scored in the `ligand` class, which
+        // is where a modified residue's own dictionary bonds land.
+        modifiedBondRatio: scored.ratios.ligand ?? 0,
+        controlBondRatio: scored.ratios.mainchain ?? 0,
+        modifiedCode: modifications.map((one) => one.code).join(","),
+      };
+    })()),
+    contactAgreement: agreement,
+    // 🔴 A CHECKSUM OF EVERY ATOM, so an arm that changed the fold says so. A
+    // fold tool that prints a pLDDT and a contact count can watch a structure
+    // move and report the same two numbers; see the note on meanPlddt in
+    // CLAUDE.md, which is the same lesson on AF3.
+    atomChecksum: (() => {
+      let sum = 0;
+      for (let i = 0; i < result.coordinates.length; i += 1) {
+        sum = (sum + Math.round(result.coordinates[i] * 1000)) | 0;
+      }
+      return sum;
+    })(),
+    pdb,
+  };
+}

@@ -1,0 +1,413 @@
+/**
+ * A ligand's bonds, from the CCD to the model and to the viewer.
+ *
+ * They were read correctly and then dropped twice, on two independent paths,
+ * and each drop was invisible from the other side:
+ *
+ *   THE MODEL. `featurise.js` builds the contact matrix and `fold.js` handed
+ *   the trunk an object built FIELD BY FIELD that did not name it, so the
+ *   embedder saw `undefined`; and `embedder.js` - the one a browser fold
+ *   runs - had neither the `bondEmbedding` weight nor the term, while
+ *   `embedder.js` had both. `bond_embedding/weights` was downloaded
+ *   with every fold and multiplied by nothing. The pair track therefore carried
+ *   no statement that any two ligand atoms are bonded.
+ *
+ *   THE VIEWER. `toPdb` wrote no CONECT records, so py2Dmol fell back to
+ *   deriving bonds from the DISTANCE between atoms - re-derived from every
+ *   trajectory frame, whose coordinates are deliberately noisy until the last
+ *   few diffusion steps. The sticks appear, cross and vanish frame to frame.
+ *   And the element column had a four-entry table (C, N, O, S) with everything
+ *   else falling through to carbon, which breaks that fallback a second way:
+ *   the distance rule is per ELEMENT PAIR.
+ *
+ * The GPU half is checked in tools/gpu/check-af3-embedder.js, which now carries
+ * a bond matrix - without one it compared zero against zero on both sides,
+ * which is why it passed throughout.
+ */
+import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
+import { describe, it } from "node:test";
+
+import { af3Source } from "./helpers/af3-source.js";
+import { featuriseProtein } from "../shared/af3/featurise/featurise.js";
+import { paeMatrix } from "../web/prediction-results.js";
+import { toPdb } from "../webgpu/af3/fold.js";
+import { ELEMENT_SYMBOLS, ligandChain } from "../shared/af3/featurise/ccd-component.js";
+
+// the first ligand token: one past the polymers
+const polymerStart = (batch) => batch.ligandSpans[0].from;
+
+/**
+ * A ligand shaped like a small phosphate-and-metal cofactor: the elements are
+ * chosen so that every one of them EXCEPT carbon was written as carbon before,
+ * and so that two of its bonds are ones a distance rule gets wrong.
+ */
+const LIGAND = {
+  code: "TST",
+  atoms: [
+    { name: "C1", element: 6, charge: 0, x: 0, y: 0, z: 0 },
+    { name: "O1", element: 8, charge: 0, x: 1.4, y: 0, z: 0 },
+    { name: "P1", element: 15, charge: 0, x: 3.0, y: 0, z: 0 },
+    { name: "S1", element: 16, charge: 0, x: 4.6, y: 0, z: 0 },
+    { name: "S2", element: 16, charge: 0, x: 6.65, y: 0, z: 0 },
+    { name: "FE1", element: 26, charge: 0, x: 9.0, y: 0, z: 0 },
+  ],
+  bonds: [
+    { from: 0, to: 1, order: 1 },
+    { from: 1, to: 2, order: 1 },
+    { from: 2, to: 3, order: 1 },
+    { from: 3, to: 4, order: 1 },   // S-S at 2.05 A
+    { from: 4, to: 5, order: 1 },   // S-FE at 2.35 A
+  ],
+};
+
+const batchWithLigand = () => featuriseProtein("GWSTELEKHR", { ligands: [LIGAND] });
+
+/** A batch's positions, straight from the reference conformer it was given. */
+function positionsOf(batch) {
+  const positions = new Float32Array(batch.tokens * batch.dense * 3);
+  positions.set(batch.features.refPos ?? batch.refPos ?? []);
+  return positions;
+}
+
+describe("a ligand's bonds reach the model", () => {
+  it("is featurised as a contact matrix, one direction per bond", () => {
+    const batch = batchWithLigand();
+    assert.ok(batch.bondMatrix !== undefined, "no contact matrix was built");
+    assert.equal(batch.bondMatrix.length, batch.tokens * batch.tokens);
+
+    const base = batch.ligandSpans[0].from;
+    const at = (i, j) => batch.bondMatrix[(base + i) * batch.tokens + (base + j)];
+    for (const bond of LIGAND.bonds) {
+      assert.equal(at(bond.from, bond.to), 1,
+        `bond ${bond.from}-${bond.to} is not in the matrix`);
+    }
+    // ...ONE DIRECTION. AF3's featurisation sets contact[i][j] and not [j][i];
+    // only the OpenFold3 dialect symmetrises, and these are stock weights.
+    assert.equal(at(1, 0), 0, "the matrix was symmetrised, which is the OF3 dialect");
+    // ...and the total is exactly the bond count, so nothing else was set.
+    const set = batch.bondMatrix.reduce((sum, value) => sum + value, 0);
+    assert.equal(set, LIGAND.bonds.length);
+  });
+
+  it("survives the trunk input, which is rebuilt field by field", () => {
+    // 🔴 THE FAULT THIS PINS. fold.js assembles the trunk's input as an object
+    // literal, so a key the batch carries and the literal does not name is a
+    // key thrown away - and `undefined` there is indistinguishable from a fold
+    // with no ligand, which is what made it survive. Read out of the source,
+    // because the alternative is running a fold.
+    const source = af3Source("webgpu:fold.js");
+    const call = source.slice(source.indexOf("trunk = await trunkGpu.run({"),
+                              source.indexOf("}, weights.trunk, weights.trunk.dialect"));
+    assert.ok(/bondMatrix:\s*batch\.bondMatrix/.test(call),
+      "fold.js does not pass the contact matrix to the trunk");
+  });
+
+  it("is applied by the GPU embedder, not only by the reference", () => {
+    // The reference has had this term throughout; the GPU path is what a
+    // browser fold runs, and it had neither the weight nor the arithmetic.
+    const gpu = af3Source("webgpu:embedder.js");
+    assert.ok(/"bondEmbedding"/.test(gpu),
+      "bondEmbedding is not in the GPU embedder's packed weight list");
+    assert.ok(/bonds\[row\]\s*\*\s*weights\[W_BOND \+ c\]/.test(gpu),
+      "the GPU pair init does not add the bond term");
+    // ...and the weight has to be loadable, or packEmbedderWeights throws.
+    const weights = af3Source("shared:weights.js");
+    assert.ok(/bondEmbedding:\s*await T\("bond_embedding\/weights"\)/.test(weights),
+      "embedderWeights does not read bond_embedding/weights");
+  });
+});
+
+describe("a ligand's bonds reach the viewer", () => {
+  it("writes CONECT records for every bond, both directions", () => {
+    const batch = batchWithLigand();
+    const pdb = toPdb(batch, positionsOf(batch), null);
+    const conect = pdb.split("\n").filter((line) => line.startsWith("CONECT"));
+    assert.ok(conect.length > 0, "the PDB carries no CONECT records at all");
+
+    // Every bond, as an unordered pair of serials, exactly once.
+    const serials = new Map();          // atom name -> serial
+    for (const line of pdb.split("\n")) {
+      if (!line.startsWith("HETATM")) continue;
+      serials.set(line.slice(12, 16).trim(), Number(line.slice(6, 11)));
+    }
+    const pairs = new Set();
+    for (const line of conect) {
+      const from = Number(line.slice(6, 11));
+      for (let field = 0; field < 4; field += 1) {
+        const text = line.slice(11 + field * 5, 16 + field * 5).trim();
+        if (text === "") continue;
+        const to = Number(text);
+        pairs.add([from, to].sort((a, b) => a - b).join("-"));
+      }
+    }
+    for (const bond of LIGAND.bonds) {
+      const a = serials.get(LIGAND.atoms[bond.from].name);
+      const b = serials.get(LIGAND.atoms[bond.to].name);
+      const key = [a, b].sort((x, y) => x - y).join("-");
+      assert.ok(pairs.has(key),
+        `${LIGAND.atoms[bond.from].name}-${LIGAND.atoms[bond.to].name} has no CONECT`);
+    }
+    assert.equal(pairs.size, LIGAND.bonds.length, "extra bonds were invented");
+    // ...and nothing was claimed between the polymer and the ligand: that link
+    // is not featurised, so writing one would be the writer inventing chemistry
+    // the fold never saw.
+    const ligandSerials = new Set(LIGAND.atoms.map((atom) => serials.get(atom.name)));
+    for (const key of pairs) {
+      for (const serial of key.split("-")) {
+        assert.ok(ligandSerials.has(Number(serial)),
+          `CONECT names serial ${serial}, which is not a ligand atom`);
+      }
+    }
+  });
+
+  it("writes each atom's real element, not carbon for everything but CNOS", () => {
+    const batch = batchWithLigand();
+    const pdb = toPdb(batch, positionsOf(batch), null);
+    const written = new Map();
+    for (const line of pdb.split("\n")) {
+      if (!line.startsWith("HETATM")) continue;
+      written.set(line.slice(12, 16).trim(), line.slice(76, 78).trim());
+    }
+    for (const atom of LIGAND.atoms) {
+      assert.equal(written.get(atom.name), ELEMENT_SYMBOLS[atom.element - 1],
+        `${atom.name} was written as ${written.get(atom.name)}`);
+    }
+    // The two that used to come out as carbon and matter most: a phosphorus,
+    // whose P-O bond a C-O distance rule judges by two hundredths of an
+    // angstrom, and an iron, which is drawn at a carbon's radius and colour.
+    assert.equal(written.get("P1"), "P");
+    assert.equal(written.get("FE1"), "FE");
+  });
+});
+
+describe("a ligand's PAE reaches the viewer", () => {
+  // 🔴 THE MATRIX WAS CROPPED TO THE POLYMER, AND DID NOT NEED TO BE.
+  //
+  // AlphaFold 3 scores TOKENS - one per residue, one per ligand HEAVY ATOM - so
+  // a mixed fold's matrix is wider than the sequence, and `paeSize` used to
+  // take the top-left `residues x residues` block for that reason. Reported as
+  // the PAE missing the ligand part of a protein+ligand fold.
+  //
+  // The premise was wrong: py2Dmol carries one POSITION per ligand heavy atom
+  // as well, and reads them in file order, which is the order toPdb writes,
+  // which is token order. The two index spaces are the same one.
+  it("has one token per residue and one per ligand heavy atom, in that order", () => {
+    const batch = batchWithLigand();
+    assert.equal(batch.tokens, 10 + LIGAND.atoms.length,
+      "a ligand is one token per heavy atom, after the polymer");
+    const span = batch.ligandSpans[0];
+    assert.equal(span.from, 10, "the ligand's tokens do not start after the chain");
+    assert.equal(span.count, LIGAND.atoms.length);
+  });
+
+  it("...and the PDB it writes has exactly those positions, in that order", () => {
+    // 🔴 A POSITION IS NOT A RECORD. The first version of this counted ATOM and
+    // HETATM lines and expected 16; there are 94, because a polymer token is a
+    // residue and toPdb writes its whole dense atom layout. py2Dmol makes ONE
+    // position per protein residue - its trace atom, the CA - and one per
+    // HETATM, which is what has to line up with the tokens, and does: measured
+    // through py2Dmol's own parser, this file gives 16 positions, 10 typed P
+    // then 6 typed L.
+    const batch = batchWithLigand();
+    const lines = toPdb(batch, positionsOf(batch), null).split("\n");
+    const atoms = lines.filter((l) => l.startsWith("ATOM") || l.startsWith("HETATM"));
+    const traced = atoms.filter(
+      (l) => l.startsWith("HETATM") || l.slice(12, 16).trim() === "CA");
+    assert.equal(traced.length, batch.tokens,
+      `the file gives ${traced.length} drawn positions for ${batch.tokens} tokens`);
+    const firstHet = traced.findIndex((l) => l.startsWith("HETATM"));
+    assert.equal(firstHet, 10, "the ligand does not begin where its tokens do");
+    assert.ok(traced.slice(firstHet).every((l) => l.startsWith("HETATM")),
+      "the ligand's atoms are not contiguous to the end");
+  });
+
+  it("and web/app.js asks for all of them", () => {
+    // 🔴 THE CHECK BELOW WAS NOT ENOUGH ON ITS OWN. It calls paeMatrix with the
+    // full stride and proves the function keeps what it is given - and the bug
+    // was never in the function, it was in what the CALLER asked for. Restoring
+    // the crop left every other assertion here green.
+    //
+    // `paeSize` is a closure inside foldWithAf3 and cannot be called from here,
+    // so it is read, the same way the trunk input's bondMatrix key is.
+    const source = readSource("web/app.js");
+    const at = source.indexOf("const paeSize =");
+    assert.ok(at >= 0, "paeSize is gone - this check now reads nothing");
+    const line = source.slice(at, source.indexOf("\n", at));
+    assert.ok(/Math\.round\(Math\.sqrt\(values\.length\)\)/.test(line),
+      `paeSize does not take the matrix's own width: ${line}`);
+    assert.ok(!/residues/.test(line),
+      `paeSize is cropping to the residue count again: ${line}`);
+  });
+
+  it("keeps every row, so the ligand block is drawn", () => {
+    const batch = batchWithLigand();
+    const n = batch.tokens;
+    // A matrix whose every cell names its own coordinates, so a crop or a
+    // stride error is visible as a WRONG NUMBER rather than a missing one.
+    const values = new Float32Array(n * n);
+    for (let i = 0; i < n; i += 1) {
+      for (let j = 0; j < n; j += 1) values[i * n + j] = i * 100 + j;
+    }
+    // what web/app.js now asks for
+    const size = Math.round(Math.sqrt(values.length));
+    assert.equal(size, n);
+    const rows = paeMatrix(values, size);
+    assert.equal(rows.length, n, "rows were dropped");
+    assert.equal(rows[0].length, n, "columns were dropped");
+    // the ligand's own block, and the protein-ligand corner that is the whole
+    // reason to look at a mixed fold's PAE
+    const lig = batch.ligandSpans[0].from;
+    assert.equal(rows[lig][lig], lig * 100 + lig, "the ligand block is wrong");
+    assert.equal(rows[0][lig], lig, "the protein-to-ligand corner is wrong");
+    assert.equal(rows[lig][0], lig * 100, "the ligand-to-protein corner is wrong");
+    // ...and the OLD behaviour, named, so this cannot silently come back
+    const cropped = paeMatrix(values, 10);
+    assert.equal(cropped.length, 10);
+    assert.ok(cropped.every((row) => row.length === 10),
+      "the crop is what the report was about; it still has to work when asked for");
+  });
+});
+
+/**
+ * 🔴 THE SAME DROP, ON ESMFold2, FOUND BY A USER AND NOT BY A GATE. The page's
+ * guard says a modified residue needs "AF3, OpenBind-0 or ESMFold2",
+ * `featuriseForEsmfold2` spreads its request straight into `featuriseProtein`,
+ * and `languageModelInput` groups tokens by `(asymId, residueIndex)` precisely
+ * so an atomised residue's ten tokens collapse into one ESM-C row. The only
+ * thing missing was that `foldWithEsmfold2` did not take `modifications`, and
+ * the entities literal did not name it - so a SEP@3 job folded a plain serine.
+ *
+ * 🔴 AND NOTHING COULD HAVE CAUGHT IT: `npm run test:modified` folds SEP@3
+ * through seven AF3-lineage bundles and not this one, because
+ * `probe-modified.js` opens an AF3 store and calls `foldBatch`. This is the
+ * STRUCTURAL half - the half that matches the actual bug, which was a key
+ * absent from a literal - and it is what stops the regression. A fold gate for
+ * this path is still missing; see docs/WEB.md.
+ *
+ * CLAUDE.md's allow-list trap, fourth time at this seam.
+ */
+describe("a modified residue reaches ESMFold2", () => {
+  const app = readSource("web/app.js");
+  const from = app.indexOf("async function foldWithEsmfold2(");
+  // 🔴 TO THE END OF THE FUNCTION, NOT TO THE FOLD CALL. The entities literal
+  // is an ARGUMENT of `foldEsmfold2(...)`, so a slice that stops at the call
+  // stops just short of the thing this file is about - and the arm reported a
+  // missing key that was two lines further on.
+  const body = app.slice(from, app.indexOf("\nasync function ", from + 10));
+
+  it("is a parameter of the ESMFold2 fold path", () => {
+    assert.ok(app.slice(from, app.indexOf(") {", from)).includes("modifications"));
+  });
+
+  it("is resolved to a component before the synchronous featuriser", () => {
+    // A code is not atoms, and the featuriser cannot await. Passing
+    // `{code, position}` straight through throws "Cannot read properties of
+    // undefined (reading 'map')" inside it - which presents as a HANG, because
+    // the caller then waits out its whole timeout for a fold that never lands.
+    assert.ok(body.includes("parseCcdComponent"), "no component fetch");
+  });
+
+  it("is named in the entities literal the featuriser is handed", () => {
+    const literal = body.slice(body.indexOf("entities: { sequence, chainKinds"));
+    assert.ok(literal.slice(0, 160).includes("modifications"),
+              "the entities literal does not name modifications");
+  });
+
+  /**
+   * 🔴 AND IN THE TRUNK KEY, or a fold WITH the modification reuses the trunk
+   * of one without it - the `chainKinds` note beside it, where folding `ACGT`
+   * as protein and then as DNA reused the first answer.
+   */
+  it("is part of the trunk key", () => {
+    const key = body.slice(body.indexOf("family: chosenFamily(), chains"));
+    assert.ok(key.slice(0, 260).includes("modifications"),
+              "the ESMFold2 trunk key does not name modifications");
+  });
+});
+
+/**
+ * 🔴 THE BONDS A JOB DECLARES - `bondedAtomPairs`, which three of AlphaFold 3's
+ * own fourteen example jobs carry and which this page refused outright. The
+ * KRAS/sotorasib example is the one that matters: sotorasib IS a covalent
+ * inhibitor, bonded to cysteine 12, and folding it beside its target rather
+ * than attached to it is a different answer. Measured through the page, same
+ * job, same seed, 50 steps: **SG-C25 is 1.62 A with the bond and 6.25 A
+ * without** - a C-S bond is ~1.81.
+ *
+ * 🔴 AN ENDPOINT IS A TOKEN, NOT AN ATOM. `token_bonds` is token x token, so an
+ * atom NAME resolves to the token carrying it - a standard residue's single
+ * token whichever atom was named, a ligand's or an atomised residue's specific
+ * one. Reading the name as an index would bond whatever happened to sit there.
+ */
+describe("a bond a job declares", () => {
+  const glycerol = {
+    code: "GOL",
+    atoms: ["C1", "O1", "C2"].map((name, slot) => ({
+      name, element: name.startsWith("O") ? 8 : 6, charge: 0,
+      x: slot, y: 0, z: 0, componentSlot: slot,
+    })),
+    bonds: [{ from: 0, to: 1, order: 1 }, { from: 1, to: 2, order: 1 }],
+  };
+  const batchWith = (bonds) => featuriseProtein("GWCTE", {
+    chainKinds: ["protein"], ligands: [glycerol], bonds,
+  });
+
+  it("joins a polymer residue to a ligand atom, in the job's direction, as a covalent bond", () => {
+    const batch = batchWith([
+      { from: { asym: 0, residue: 3, atom: "SG" }, to: { asym: 1, atom: "C2" } },
+    ]);
+    const tokens = batch.tokens;
+    // Residue 3 of GWCTE is the cysteine: one token, index 2. The ligand's
+    // three atoms follow the five polymer tokens, so C2 is token 5 + 2.
+    const cys = 2;
+    const c2 = batch.ligandSpans[0].from + 2;
+    // 🔴 ONE DIRECTION, [from][to]: AF3's gather lists a declared bond once, in
+    // the order the job writes it (dumped with the pair reversed, it reverses),
+    // and its contact matrix sets exactly the listed cell. This test asserted
+    // both until a reference batch with a declared bond existed.
+    assert.equal(batch.bondMatrix[cys * tokens + c2], 1);
+    assert.equal(batch.bondMatrix[c2 * tokens + cys], 0);
+    // ...and COVALENT (5), the code AF3 gives every link between two residues
+    assert.equal(batch.bondOrderMatrix[cys * tokens + c2], 5);
+  });
+
+  it("builds a chain of components, a residue each, bonded where the job says", () => {
+    const sugar = (code) => ({ ...glycerol, code });
+    const chain = ligandChain([sugar("NAG"), sugar("BMA")]);
+    const batch = featuriseProtein("GWCTE", {
+      chainKinds: ["protein"], ligands: [chain],
+      bonds: [{ from: { asym: 1, residue: 1, atom: "O1" }, to: { asym: 1, residue: 2, atom: "C1" } }],
+    });
+    const start = polymerStart(batch);
+    // two components, one chain: residues 1 and 2, one asym, a reference space each
+    assert.deepEqual(Array.from(batch.features.residueIndex.slice(start, start + 6)), [1, 1, 1, 2, 2, 2]);
+    assert.equal(new Set(Array.from(batch.features.asymId.slice(start, start + 6))).size, 1);
+    assert.deepEqual(batch.ligandSpans.map((span) => span.code), ["NAG", "BMA"]);
+    // O1 of the first (token +1) to C1 of the second (token +3): C1 is in both
+    assert.equal(batch.bondMatrix[(start + 1) * batch.tokens + start + 3], 1);
+  });
+
+  it("refuses an atom the component does not have, by name", () => {
+    let message = "(no refusal)";
+    try {
+      batchWith([{ from: { asym: 0, residue: 3, atom: "SG" },
+                   to: { asym: 1, atom: "C99" } }]);
+    } catch (error) { message = error.message; }
+    // 🔴 THIS IS ALSO WHAT PROTECTS AN EDITED ROW. The page holds a job's bonds
+    // by chain POSITION, so editing the entity list can move what sits there -
+    // and resolving by atom NAME means the common case throws rather than
+    // bonding something else.
+    assert.ok(message.includes("no atom C99"), message);
+  });
+
+  it("is forwarded by the batch builder, which lists its fields by hand", () => {
+    // The literal in shared/af3/featurise/batch.js is exactly the kind that loses
+    // a key - it is how `modifications` went missing on the ESMFold2 path.
+    assert.ok(readSource("shared/af3/featurise/batch.js").includes("bonds: options.bonds"));
+  });
+});
+
+function readSource(relative) {
+  return readFileSync(new URL(`../${relative}`, import.meta.url), "utf8");
+}

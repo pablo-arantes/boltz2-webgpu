@@ -1,0 +1,174 @@
+node_modules/
+dist/
+# The exported browser weights, written by tools/export-web-model.js.
+# 🔴 ANCHORED. Written as `model/` this matched ANY directory of that name at
+# any depth, so it silently swallowed src/model/ - monomer.js and query-only.js
+# were never committed, and the deployed site 404'd on both while every local
+# checkout worked. A leading slash keeps it to the one at the root.
+/model/
+coverage/
+artifacts/
+test-results/
+playwright-report/
+*.log
+.DS_Store
+# Full-model captures are local development assets. The publish branch retains
+# only a small subset needed by the default unit tests.
+test/fixtures/evoformer/
+
+# Benchmark and diagnostic pages written during optimisation work.
+.scratch/
+# The float32 master the quantiser reads; /model/ above is its int8 output.
+/model.f32-backup/
+
+# Written whenever tools/build_site.py imports a sibling.
+__pycache__/
+
+# The multimer export, written by tools/export_multimer_model.py: the shipped
+# int8 one, and the float32 one the oracle uses to separate the graph from the
+# quantisation.
+/model-multimer
+/model-multimer-f32
+
+# Every oracle dump, from every dump script, in one directory.
+# 🔴 THEY USED TO SIT IN THE REPOSITORY ROOT, one ignore rule per file, and the
+# list went stale every time a dump script learned a new output. 300 MB of
+# generated tensors beside index.html also reads as repository content, which
+# is the part that matters: a reader cannot tell what is the project and what
+# is somebody's afternoon. One directory, one rule, and the checkers fetch from
+# it by path.
+/oracle-dumps/
+
+# The AF3 trunk export, written by tools/export_af3_model.py: the float32 master
+# and tools/quantize_model.py's int8 output.
+/model-af3
+/model-af3-f32
+
+# The full AF3 export, including the diffusion and confidence heads.
+/model-af3-full-f32
+/model-af3-full
+/model-af3-int5
+# ...and the same pair for OpenBind, OpenFold3's v0.5.0 release, written by
+# the same two tools with --model openbind.
+/model-openbind0-full-f32
+/model-openbind0-int5
+# OpenDDE's exports, in the four shapes the port produces. The bundle is
+# hosted (see MODEL_BUNDLES.opendde); the checkout keeps none of it.
+/model-opendde-full-f32
+/model-opendde-int5
+/model-opendde-trunk-f32
+/model-opendde-trunk-int5
+
+# A saved copy of Google's AlphaFold Server page, kept locally as a reference
+# for the entity interface. Not ours to redistribute, and not repo content.
+server_suff/
+server_stuff/
+natives
+
+# The AF2 distogram/pLDDT training set, written by
+# tools/gpu/probe-af2-dgram-plddt.js: 108 single-sequence targets over four
+# recycles, ~250 MB. Collected once and kept; see HANDOFF.md.
+/plddt-data/
+
+# ESM-C and ESMFold2, downloaded from Hugging Face by tools/esmc/fetch.py.
+# The tower alone is 2.3 GB of float32 and the point of the work in tools/esmc/
+# is to find out how much smaller it can be; neither belongs in the repository.
+/esmc-600m/
+/esmc-300m/
+/esmfold2-fast-600m/
+/esmfold2-fast-300m/
+# ...and the 6B fold half, downloaded to read its architecture.
+/esmfold2-fast-6b/
+/model-esmc-*/
+# ...and EF2-fast's own bundles, both sizes.
+/model-ef2-fast-*/
+/model-esmc-600m-f32
+/model-esmc-600m-int5
+
+# transformers, installed with --system-site-packages so it shares this
+# machine's torch, purely to have an ORACLE for the hand-written ESM-C forward
+# in tools/esmc/esmc_forward.py. Nothing shipped imports it.
+/.venv-esm/
+/model-esmfold2-*/
+/model-esmfold2-trunk-f32
+/esmfold2-fold.pdb
+
+# 🔴 HELD BACK UNTIL THEY ARE FIXED AND CHECKED, not deleted. Both pages were
+# built against a model row that has moved under them; they stay on disk while
+# that is sorted out, and tools/build_site.py and tools/mobile-layout.py skip a
+# page they cannot find rather than failing on it.
+/single.html
+/proteinhunter.html
+
+# tools/gpu/bench-jaxjs-matmul.js wants @jax-js/jax's dist copied here.
+/.jaxjs-tmp
+.ipynb_checkpoints/
+
+# Exported weight bundles: gigabytes of generated tensors, never repository content.
+model-*/
+# 🔴 ...AND A SYMLINK TO ONE IS NOT A DIRECTORY. A trailing slash matches only
+# a real directory, so a checkout that points `model` and `model-af3-int5` at
+# weights living elsewhere - which is how a machine with several checkouts
+# shares 265 MB - left every one of them UNTRACKED and visible. It is
+# tools/deploy.py that says so, by refusing to deploy a dirty tree.
+/model
+model-*
+
+# A working copy of a tool, kept on disk and out of the index. `_fold_film.py`
+# is a shorter copy of fold-in-page.py from an earlier session; docs/TOOLS.md
+# is derived from the tools that exist, so a duplicate under its own name
+# would have to be indexed and explained, and a leading underscore says it is
+# somebody's scratch rather than a tool this repository offers.
+tools/_*.py
+
+# A saved py2Dmol session and the merge scratch beside it: local, and written
+# by using the page rather than by developing it.
+/py2dmol_state_*.json
+/_merge_state.json
+# af3-any-model's published blobs, fetched for the CUDA ports (cuda/featurise/fetch-weights <model>)
+/af3am-*
+
+# the native featurisers (cuda/build.sh: one binary and the names linked to it)
+cuda/featurise/featurise
+cuda/featurise/*-featurise
+cuda/featurise/chem-probe
+cuda/featurise/resolve-templates
+cuda/featurise/fetch-weights
+cuda/featurise/msa-search
+cuda/featurise/standalone.o
+cuda/featurise/*.stamp
+cuda/featurise/*.building
+
+# the localfold wheel's build products (python/build_wheel.sh)
+python/dist/
+python/build/
+python/localfold/site/
+python/*.egg-info/
+
+# wwPDB's whole chemical component dictionary (cuda/featurise/fetch-weights ccd)
+/ccd/
+
+# the Metal port (metal/build.sh): the kernel sources embedded as a string, and the binaries
+metal/build/
+metal/*/localfold-*
+metal/**/*.combined
+.localfold-fetch.lock
+oracle-dumps-colab/
+
+# BioEmu2, written by tools/export_bioemu2_model.py and tools/quantize_af3.py
+/model-bioemu2-f32
+/model-bioemu2-int5
+
+# RFD4-Proteina's INT8 shards: ~420 MB, hosted rather than committed, exactly as
+# the nine fold bundles are. The config and the tensor manifest beside them ARE
+# tracked - they are what the tests read and what says where a tensor lives.
+# 🔴 RENAMED FROM `weights/` ONCE THE HOSTING DECISION WAS MADE: the shards are
+# served by sokrypton/rfd4-proteina-webgpu's Pages URL and are never kept here,
+# so a top-level directory called `weights/` named something this repository
+# does not have. It matches the nine fold bundles' `model-*` convention now, and
+# holds only the config and the tensor manifest - text the tests read offline.
+model-rfd4p-int8/*.bin
+model-rfd4p-int8/*.safetensors
+model-rfd4p-int8/shards/
+# metal/rfd4p/gate.py's reference trajectories: a CPU forward per arm, gigabytes, rebuilt on demand
+/.rfd4p-gate/

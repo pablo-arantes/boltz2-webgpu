@@ -1,0 +1,118 @@
+name: Deploy WebGPU demo
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No node, no npm, no install step: the page loads shared/, cpu/ and webgpu/**/*.js as written,
+      # so assembling the site is a copy with an allow-list. python3 is already
+      # on the runner.
+      - name: Assemble the site
+        run: python3 tools/build_site.py
+
+      # GitHub Pages is public even when its source repository is private, so
+      # the parameters ship only when the repository variable says so.
+      - name: Add the single model-1 PTM release bundle
+        if: ${{ vars.LOCALFOLD_INCLUDE_MODEL == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 🔴 THE REGISTRY DECIDES, NOT THIS FILE. A bundle with a `remote`
+          # in shared/bundles/manifests/index.js is fetched by the browser from
+          # there, so publishing a copy here would spend the Pages allowance on
+          # bytes nothing loads. Asking build_site.py keeps one answer.
+          if python3 tools/build_site.py --is-remote monomer; then
+            echo "monomer is hosted remotely; not publishing it"
+            exit 0
+          fi
+          gh release download model1-ptm --pattern localfold-model1-ptm.tar.gz
+          tar -xzf localfold-model1-ptm.tar.gz -C dist
+
+      # 🔴 A SEPARATE BUNDLE AND A SEPARATE SWITCH. Multimer is another 98 MiB
+      # on top of the monomer's 97, and the page loads whichever the fold asks
+      # for, so a site can carry one, both, or neither. Without this the model
+      # dropdown still offers Multimer - and Auto selects it for any sequence
+      # with a ':' - which then fails on a manifest that was never deployed.
+      - name: Add the multimer model-1 release bundle
+        if: ${{ vars.LOCALFOLD_INCLUDE_MULTIMER_MODEL == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 🔴 THE REGISTRY DECIDES, NOT THIS FILE. A bundle with a `remote`
+          # in shared/bundles/manifests/index.js is fetched by the browser from
+          # there, so publishing a copy here would spend the Pages allowance on
+          # bytes nothing loads. Asking build_site.py keeps one answer.
+          if python3 tools/build_site.py --is-remote multimer; then
+            echo "multimer is hosted remotely; not publishing it"
+            exit 0
+          fi
+          gh release download model1-multimer-v3 --pattern localfold-model1-multimer-v3.tar.gz
+          tar -xzf localfold-model1-multimer-v3.tar.gz -C dist
+
+      # 🔴 A RESTRICTED BUNDLE, AND THE ONLY ONE SO FAR. model-af3-int5 holds
+      # DeepMind's AF3 parameters, not OpenFold3's - they carry a Prohibited Use
+      # Policy and terms that forbid redistribution, so publishing them is a
+      # deliberate act by whoever runs this deployment. It takes BOTH repository
+      # variables: one to include the bundle, one naming the terms accepted.
+      #
+      # 🔴 AND THAT SECOND VARIABLE EXISTS BECAUSE THIS STEP BYPASSES THE GATE
+      # IN build_site.py. That gate reads what a bundle's manifest SAYS IT IS
+      # and refuses to copy restricted weights without an explicit acceptance -
+      # but it only guards `--model` builds, and this job assembles the site
+      # without weights and then untars them in afterwards. Without the check
+      # below, the one path that actually publishes is the one path with no
+      # gate on it.
+      - name: Add the AlphaFold 3 int5 bundle
+        if: ${{ vars.LOCALFOLD_INCLUDE_AF3_MODEL == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACCEPTED: ${{ vars.LOCALFOLD_ACCEPT_MODEL_TERMS }}
+        run: |
+          case ",$ACCEPTED," in
+            *,alphafold3,*) ;;
+            *) echo "::error::model-af3-int5 holds DeepMind's AF3 parameters,"                     "which carry the AF3 Weights Terms of Use and Prohibited"                     "Use Policy. Set the repository variable"                     "LOCALFOLD_ACCEPT_MODEL_TERMS to include alphafold3 to"                     "confirm the licence covers this deployment."
+               exit 1 ;;
+          esac
+          # 🔴 THE REGISTRY DECIDES, NOT THIS FILE. A bundle with a `remote`
+          # in shared/bundles/manifests/index.js is fetched by the browser from
+          # there, so publishing a copy here would spend the Pages allowance on
+          # bytes nothing loads. Asking build_site.py keeps one answer.
+          if python3 tools/build_site.py --is-remote af3; then
+            echo "af3 is hosted remotely; not publishing it"
+            exit 0
+          fi
+          gh release download af3-int5 --pattern localfold-af3-int5.tar.gz
+          tar -xzf localfold-af3-int5.tar.gz -C dist
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+          include-hidden-files: true
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

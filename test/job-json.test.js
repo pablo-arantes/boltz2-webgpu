@@ -1,0 +1,520 @@
+/**
+ * Reading an AlphaFold 3 job JSON, in both of the dialects that name.
+ *
+ * 🔴 THE ROUND TRIP IS THE POINT, AND IT IS THE LAST TEST HERE. Everything
+ * above it checks one field; what the archive actually promises is that the
+ * file it writes describes the fold it wrote it for, and the only way to say
+ * that is to write one and read it back. Both times a field went missing this
+ * week - the templates, then the modifications - it went missing on the way
+ * OUT, with every field-by-field test passing.
+ */
+import { describe, expect, it } from "./harness.js";
+import { jobFromJson, jobInputJson, jobRequestJson } from "../web/job-json.js";
+
+const server = (sequences, extra = {}) => JSON.stringify([{
+  name: "j", modelSeeds: ["7"], sequences,
+  dialect: "alphafoldserver", version: 3, ...extra,
+}]);
+// 🔴 `dialect` AND `version` TOGETHER, because upstream's own reader demands
+// both for this dialect and all fourteen of its example files carry both. The
+// helper omitted the dialect and leaned on our default, which meant every test
+// below was written against a file AlphaFold 3 itself would refuse.
+const open = (sequences, extra = {}) => JSON.stringify({
+  name: "j", modelSeeds: [7], sequences,
+  dialect: "alphafold3", version: 2, ...extra,
+});
+const refusal = (text) => {
+  try { jobFromJson(text); } catch (error) { return error.message; }
+  return "(no refusal)";
+};
+
+describe("reading the server's own dialect", () => {
+  it("reads a chain, its copies and its seed", () => {
+    const job = jobFromJson(server([
+      { proteinChain: { sequence: "ACDEFGHIK", count: 2 } },
+    ]));
+    expect(job.dialect).toBe("alphafoldserver");
+    expect(job.seed).toBe(7);
+    expect(job.entities).toHaveLength(1);
+    expect(job.entities[0].type).toBe("protein");
+    expect(job.entities[0].copies).toBe(2);
+  });
+
+  it("reads a modification back as the row spells it", () => {
+    const job = jobFromJson(server([
+      { proteinChain: { sequence: "ACSEFGHIK", count: 1,
+        modifications: [{ ptmType: "CCD_SEP", ptmPosition: 3 }] } },
+    ]));
+    expect(job.entities[0].modifications).toEqual([{ code: "SEP", position: 3 }]);
+  });
+
+  // The server has one template control and it is "search for one", so that is
+  // what the flag becomes - not a guess at which structure it found.
+  it("reads useStructureTemplate as the search", () => {
+    const job = jobFromJson(server([
+      { proteinChain: { sequence: "ACDEFGHIK", count: 1, useStructureTemplate: true } },
+    ]));
+    expect(job.entities[0].template).toEqual({ kind: "search" });
+  });
+
+  it("reads a ligand and a nucleic chain", () => {
+    const job = jobFromJson(server([
+      { proteinChain: { sequence: "ACDEFGHIK", count: 1 } },
+      { dnaSequence: { sequence: "ACGTACGT", count: 2 } },
+      { ligand: { ligand: "atp", count: 1 } },
+    ]));
+    expect(job.entities.map((entity) => entity.type))
+      .toEqual(["protein", "dna", "ligand"]);
+    expect(job.entities[2].value).toBe("ATP");
+  });
+});
+
+/**
+ * 🔴 CHECKED AGAINST AlphaFold 3'S OWN PARSER, NOT AGAINST THE DOCUMENTATION.
+ * These four came out of reading `folding_input.py` - the code that actually
+ * reads these files - after the writer was checked against it. Every one of
+ * them is a real AlphaFold Server export this reader got wrong, and NOT ONE
+ * could be caught by the example corpus, because all fourteen of those files
+ * are the other dialect.
+ */
+describe("what AlphaFold 3's own parser does with the server's files", () => {
+  // 🔴 AN ION IS ITS OWN ENTRY. `Ligand.from_alphafoldserver_dict` takes
+  // `ligand` or `ion` alike, and reading only the first refused every server
+  // job with a magnesium in it - which is half of what the ligand menu here is
+  // for. See COMMON_IONS in web/entities.js.
+  it("reads an ion entry as a ligand", () => {
+    const job = jobFromJson(server([
+      { proteinChain: { sequence: "ACDEFGHIK", count: 1 } },
+      { ion: { ion: "MG", count: 2 } },
+    ]));
+    expect(job.entities[1].type).toBe("ligand");
+    expect(job.entities[1].value).toBe("MG");
+    expect(job.entities[1].copies).toBe(2);
+  });
+
+  // ...and upstream strips the prefix, so a code kept whole would be a
+  // five-letter component this page fetches and does not find.
+  it("strips the CCD_ prefix upstream strips", () => {
+    const job = jobFromJson(server([
+      { proteinChain: { sequence: "ACDEFGHIK", count: 1 } },
+      { ligand: { ligand: "CCD_ATP", count: 1 } },
+    ]));
+    expect(job.entities[1].value).toBe("ATP");
+  });
+
+  // Both of these are in the server's allowed key set AND raise in
+  // folding_input.py. A glycan is chemistry this page does not build; a
+  // template date changes which template is found, so dropping it folds a
+  // different job with the same sequence.
+  for (const [field, value] of [["glycans", [{ residues: "NAG" }]],
+                                ["maxTemplateDate", "2021-09-30"]]) {
+    it(`refuses ${field}, as upstream does`, () => {
+      expect(refusal(server([{ proteinChain: {
+        sequence: "ACDEFGHIK", count: 1, [field]: value } }]))).toContain(field);
+    });
+  }
+
+  /**
+   * 🔴 AN UNKNOWN KEY IS REFUSED BECAUSE ALPHAFOLD 3 REFUSES IT. Every chain
+   * class upstream calls `_validate_keys` and raises on anything else, so
+   * reading past one is not generosity - it folds a job the reference
+   * implementation would not have run, from a file whose stray key is most
+   * likely a misspelling of one that matters.
+   */
+  it("refuses a key AlphaFold 3 would refuse", () => {
+    expect(refusal(server([{ proteinChain: {
+      sequence: "ACDEFGHIK", count: 1, useStructureTemplates: true } }])))
+      .toContain("useStructureTemplates");
+  });
+
+  // ...and the same for a template's own keys.
+  it("refuses an unknown template key", () => {
+    expect(refusal(open([{ protein: { id: "A", sequence: "ACDEFGHIK",
+      templates: [{ mmcif: "data_T", maxDate: "2021-09-30" }] } }])))
+      .toContain("maxDate");
+  });
+
+  /**
+   * 🔴 AND `ligand` IS THE ONE KEY BOTH DIALECTS USE, meaning different bodies.
+   * Which fields are legal comes from the body, not the entry key - keyed off
+   * the key alone, this page's OWN archive stopped being readable.
+   */
+  it("reads a ligand in either dialect's spelling", () => {
+    const fromServer = jobFromJson(server([
+      { proteinChain: { sequence: "ACDEFGHIK", count: 1 } },
+      { ligand: { ligand: "GOL", count: 1 } }]));
+    const fromOpen = jobFromJson(open([
+      { protein: { id: "A", sequence: "ACDEFGHIK" } },
+      { ligand: { id: "B", ccdCodes: ["GOL"] } }]));
+    expect(fromServer.entities[1].value).toBe("GOL");
+    expect(fromOpen.entities[1].value).toBe("GOL");
+  });
+});
+
+describe("reading the open-source dialect", () => {
+  it("reads a chain and an integer seed", () => {
+    const job = jobFromJson(open([{ protein: { id: "A", sequence: "ACDEFGHIK" } }]));
+    expect(job.dialect).toBe("alphafold3");
+    expect(job.seed).toBe(7);
+    expect(job.entities[0].copies).toBe(1);
+  });
+
+  /**
+   * 🔴 `id` IS HOW THAT DIALECT SAYS COPIES. `{"id": ["A", "B"]}` is a dimer,
+   * and read as a name it folds a monomer - the same complex the file asked
+   * for, minus a chain, with nothing anywhere saying so.
+   */
+  it("reads an id list as copies", () => {
+    const job = jobFromJson(open([
+      { protein: { id: ["A", "B", "C"], sequence: "ACDEFGHIK" } },
+    ]));
+    expect(job.entities[0].copies).toBe(3);
+  });
+
+  it("reads ccdCodes as the ligand", () => {
+    const job = jobFromJson(open([
+      { protein: { id: "A", sequence: "ACDEFGHIK" } },
+      { ligand: { id: "B", ccdCodes: ["HEM"] } },
+    ]));
+    expect(job.entities[1].type).toBe("ligand");
+    expect(job.entities[1].value).toBe("HEM");
+  });
+
+  /**
+   * 🔴 POLYMERS BEFORE LIGANDS, WHATEVER ORDER THE FILE USED. expandEntities
+   * numbers chains in list order and the featuriser puts ligand tokens after
+   * every polymer token, so a file that lists its ligand first would hand the
+   * ligand a chain index the protein still uses.
+   */
+  it("puts the ligand after the polymers whatever order the file used", () => {
+    const job = jobFromJson(open([
+      { ligand: { id: "B", ccdCodes: ["HEM"] } },
+      { protein: { id: "A", sequence: "ACDEFGHIK" } },
+    ]));
+    expect(job.entities.map((entity) => entity.type)).toEqual(["protein", "ligand"]);
+  });
+
+  /**
+   * 🔴 AN EMPTY unpairedMsa IS AN INSTRUCTION, NOT AN ABSENT FIELD. AlphaFold 3
+   * reads `""` as "fold this chain with no alignment" and an absent field as
+   * "go and search" - opposite jobs, and several minutes apart.
+   */
+  it("reads an empty alignment as single-sequence, and says so", () => {
+    const job = jobFromJson(open([
+      { protein: { id: "A", sequence: "ACDEFGHIK", unpairedMsa: "", pairedMsa: "" } },
+    ]));
+    expect(job.singleSequence).toBe(true);
+    expect(job.notes.some((note) => note.includes("no alignment"))).toBe(true);
+  });
+
+  it("reads an inline template as an uploaded structure", () => {
+    const job = jobFromJson(open([
+      { protein: { id: "A", sequence: "ACDEFGHIK",
+        templates: [{ mmcif: "data_TEST\n#\n" }] } },
+    ]));
+    expect(job.entities[0].template.kind).toBe("upload");
+    expect(job.entities[0].template.text).toBe("data_TEST\n#\n");
+  });
+});
+
+/**
+ * 🔴 WHAT THIS PAGE CANNOT RUN IS REFUSED BY NAME. Every one of these parses
+ * perfectly well as far as the sequence, so reading on would fold something
+ * adjacent to the job that was asked for and report it as the job - which is
+ * the failure mode this whole file exists to prevent, and the one the archive
+ * hit twice this week from the writing side.
+ */
+describe("a polymer is written as the sequence that folds", () => {
+  /**
+   * The sequence box keeps what was typed - a length, spaces, a FASTA header -
+   * and `expandEntities` folds `cleanSequence` of it. A job written from the
+   * raw box handed BioEmu2's featuriser "261 PRGS..." and it refused the "2",
+   * where every other model folded the 261 residues; the archive recorded the
+   * typing rather than the molecule.
+   */
+  const entities = [
+    { type: "protein", value: "261 prgs hml\n", copies: 1 },
+    { type: "dna", value: ">x\nAC GT", copies: 1 },
+  ];
+  it("in both dialects", () => {
+    const open = JSON.parse(jobInputJson({ name: "t", seed: 7, entities }));
+    expect(open.sequences.map((s) => (s.protein ?? s.dna).sequence)).toEqual(["PRGSHML", "ACGT"]);
+    const back = jobFromJson(jobRequestJson({ name: "t", seed: 7, entities }));
+    expect(back.entities.map((e) => e.value)).toEqual(["PRGSHML", "ACGT"]);
+  });
+});
+
+describe("a SMILES ligand survives the archive", () => {
+  /**
+   * 🔴 THE ARCHIVE RECORDED BENZENE AS CYCLOHEXANE, AND THAT IS WHY THIS
+   * EXISTS. `jobRequestJson`'s last branch was a catch-all `else` that turned
+   * every non-polymer row into `{ligand: {ligand: value.toUpperCase()}}`, so
+   * `c1ccccc1` was written `C1CCCCC1` - a different molecule - labelled as a
+   * dictionary code. A long SMILES then throws on read-back, which is
+   * survivable. A SHORT one does not: `C` is a valid SMILES for methane AND a
+   * valid CCD code for cytidine monophosphate, so that job round-tripped
+   * silently into a nucleotide.
+   *
+   * The archive is the file a reader hands back to reproduce a fold. This
+   * file's own header says a request that lists the parent sequence alone
+   * "describes a DIFFERENT job"; so does one that lists a different molecule.
+   */
+  const roundTrip = (entities) => {
+    const back = jobFromJson(jobRequestJson({ name: "t", seed: 7, entities }));
+    const shape = (list) => list
+      .map((entity) => `${entity.type}:${entity.value}x${entity.copies}`)
+      // 🔴 SORTED, BECAUSE THE READER GROUPS POLYMERS BEFORE LIGANDS. That is
+      // pre-existing and true of the server dialect too - verified by
+      // round-tripping a protein/ligand/DNA job through the untouched path -
+      // and it reorders rather than changes anything.
+      .sort();
+    return { before: shape(entities), after: shape(back.entities) };
+  };
+
+  it("keeps the string exactly, case and all", () => {
+    const { before, after } = roundTrip([
+      { type: "protein", value: "MKTSYIAKQRQ", copies: 1, modifications: [] },
+      { type: "smiles", value: "c1ccccc1", copies: 1, modifications: [] },
+    ]);
+    expect(after).toEqual(before);
+  });
+
+  it("keeps a one-character SMILES that is also a CCD code", () => {
+    // The silent case: upper-casing does nothing to `C`, so nothing looked
+    // wrong, and it read back as cytidine monophosphate.
+    const { before, after } = roundTrip([
+      { type: "smiles", value: "C", copies: 1, modifications: [] },
+    ]);
+    expect(after).toEqual(before);
+  });
+
+  it("keeps a whole mixed job", () => {
+    const { before, after } = roundTrip([
+      { type: "protein", value: "MKTSYIAKQRQ", copies: 2,
+        modifications: [{ code: "SEP", position: 4 }] },
+      { type: "smiles", value: "OC(=O)CCCC[C@@H]1SC[C@@H]2NC(=O)N[C@H]12",
+        copies: 1, modifications: [] },
+      { type: "ligand", value: "ATP", copies: 2, modifications: [] },
+      { type: "dna", value: "ACGT", copies: 1, modifications: [] },
+    ]);
+    expect(after).toEqual(before);
+  });
+
+  it("hands a job's own chemistry (userCCD) to the caller rather than refusing it", () => {
+    // the native exporter resolves ligand codes against it; the page refuses it in applyJob
+    const job = jobFromJson(server([{ proteinChain: { sequence: "ACDEFGHIK", count: 1 } }],
+                                   { userCCD: "data_LIG\n_chem_comp.id LIG" }));
+    expect(job.userCcd).toContain("data_LIG");
+  });
+
+  it("reads a template's explicit residue mapping, and refuses a lopsided one", () => {
+    const job = (template) => open([{ protein: { id: "A", sequence: "ACDEFGHIK", templates: [template] } }]);
+    const read = jobFromJson(job({ mmcif: "data_T\n_atom_site.id 1", queryIndices: [0, 1, 2], templateIndices: [3, 4, 5] }));
+    expect(read.entities[0].template.mapping).toEqual([[0, 3], [1, 4], [2, 5]]);
+    expect(refusal(job({ mmcif: "data_T", queryIndices: [0, 1], templateIndices: [0] }))).toContain("one length");
+  });
+
+  it("keeps a ligand of several components as one chain", () => {
+    // the server's `ligand` holds one code, so a glycan forces the open dialect's ccdCodes list
+    const { before, after } = roundTrip([
+      { type: "protein", value: "MKTSYIAKQRQ", copies: 1, modifications: [] },
+      { type: "ligand", value: "NAG,NAG,BMA", copies: 1, modifications: [] },
+    ]);
+    expect(after).toEqual(before);
+  });
+
+  it("keeps a modified base, in either dialect", () => {
+    const entities = [{ type: "dna", value: "ACGTACGT", copies: 1, modifications: [{ code: "5CM", position: 2 }] }];
+    const server = jobFromJson(jobRequestJson({ name: "t", seed: 7, entities }));
+    expect(server.entities[0].modifications.map((m) => `${m.code}@${m.position}`)).toEqual(["5CM@2"]);
+    const open = jobFromJson(jobRequestJson({ name: "t", seed: 7, entities: [...entities,
+      { type: "smiles", value: "CCO", copies: 1, modifications: [] }] }));
+    expect(open.entities[0].modifications.map((m) => `${m.code}@${m.position}`)).toEqual(["5CM@2"]);
+  });
+
+  it("writes the open dialect only when it has to", () => {
+    // 🔴 THE SERVER DIALECT IS STILL WHAT AN ORDINARY JOB GETS. It is what the
+    // archive's justification rests on and what every fixture expects; the
+    // open one is used only because the server's ligand entry takes `ligand`,
+    // `ion` and `count` and has no field for a structure at all.
+    const plain = JSON.parse(jobRequestJson({ name: "t", seed: 1, entities: [
+      { type: "protein", value: "MKTSYIAKQRQ", copies: 1, modifications: [] },
+      { type: "ligand", value: "ATP", copies: 1, modifications: [] }] }))[0];
+    expect(plain.dialect).toBe("alphafoldserver");
+    expect(typeof plain.modelSeeds[0]).toBe("string");
+
+    const structural = JSON.parse(jobRequestJson({ name: "t", seed: 1, entities: [
+      { type: "smiles", value: "CCO", copies: 1, modifications: [] }] }))[0];
+    expect(structural.dialect).toBe("alphafold3");
+    // ...and the seeds change type with the dialect, which is upstream's rule.
+    expect(typeof structural.modelSeeds[0]).toBe("number");
+    expect(structural.sequences[0].ligand.smiles).toBe("CCO");
+  });
+
+  it("makes copies unique chain ids, not a repeated one", () => {
+    // In the open dialect `id` IS the copy count, read as the list's length -
+    // so two entities sharing a label is a different complex.
+    const job = JSON.parse(jobRequestJson({ name: "t", seed: 1, entities: [
+      { type: "protein", value: "MKTSYIAKQRQ", copies: 2, modifications: [] },
+      { type: "smiles", value: "CCO", copies: 3, modifications: [] }] }))[0];
+    const ids = job.sequences.flatMap((entry) => Object.values(entry)[0].id);
+    expect(ids.length).toBe(5);
+    expect(new Set(ids).size).toBe(5);
+  });
+});
+
+describe("what it refuses, and what it names", () => {
+  const cases = [
+    ["bondedAtomPairs",
+     server([{ proteinChain: { sequence: "ACDEFGHIK", count: 1 } }],
+            { bondedAtomPairs: [[["A", 1, "CA"], ["B", 1, "CA"]]] })],
+    ["userCCDPath", server([{ proteinChain: { sequence: "ACDEFGHIK", count: 1 } }],
+                           { userCCDPath: "/tmp/ccd.cif" })],
+    // 🔴 `smiles` IS ACCEPTED NOW AND THE REFUSAL MOVED TO THE AMBIGUOUS CASE.
+    // A ligand naming itself both ways cannot be resolved: see web/job-json.js.
+    ["names itself twice", open([{ ligand: { id: "B", smiles: "CCO",
+                                             ccdCodes: ["ATP"] } }])],
+    ["ring closure", open([{ ligand: { id: "B", smiles: "C1CC" } }])],
+    ["unpairedMsaPath", open([{ protein: { id: "A", sequence: "ACDEFGHIK",
+                                           unpairedMsaPath: "/tmp/a.a3m" } }])],
+    // (an alignment carried inline is held now - see test/af3-example-jobs.test.js - and
+    // only one that is not text is refused)
+    ["unpairedMsa is A3M text", open([{ protein: { id: "A", sequence: "ACDEFGHIK",
+                                                   unpairedMsa: 5 } }])],
+    ["queryIndices", open([{ protein: { id: "A", sequence: "ACDEFGHIK",
+      templates: [{ mmcif: "data_T", queryIndices: [0, 1] }] } }])],
+    ["mmcifPath", open([{ protein: { id: "A", sequence: "ACDEFGHIK",
+      templates: [{ mmcifPath: "/tmp/t.cif" }] } }])],
+    ["not a chain kind", open([{ peptide: { id: "A", sequence: "ACDE" } }])],
+    // (a modified BASE loads now; a modified amino acid on a base does not)
+    ["modified amino acid", open([{ dna: { id: "A", sequence: "ACGTACGT",
+      modifications: [{ modificationType: "SEP", basePosition: 1 }] } }])],
+    ["no `sequences`", JSON.stringify({ name: "j", modelSeeds: [1] })],
+    ["not JSON", "ACDEFGHIK"],
+  ];
+  for (const [named, text] of cases) {
+    it(`refuses ${named}, and names it`, () => {
+      expect(refusal(text).includes(named)).toBe(true);
+    });
+  }
+
+  /**
+   * 🔴 AND THE PAGE'S OWN VALIDATOR HAS THE LAST WORD. A phosphoserine on a
+   * tyrosine is wrong for the same reason whether it was typed or uploaded,
+   * and a second set of messages here would drift from the ones a typist sees.
+   */
+  it("hands a bad job to the page's own validator", () => {
+    expect(refusal(server([{ proteinChain: { sequence: "ACDEFGHIK", count: 1,
+      modifications: [{ ptmType: "CCD_SEP", ptmPosition: 2 }] } }])))
+      .toContain("SEP");
+  });
+});
+
+/**
+ * 🔴 THE TWO DIALECTS NUMBER THEIR VERSIONS SEPARATELY, AND THE REFERENCE
+ * PARSER REFUSES THE REFERENCE ARCHIVE. `folding_input.py` sets
+ * `ALPHAFOLDSERVER_JSON_VERSION = 1` and raises on anything else - while the
+ * real AlphaFold Server stamps `"version": 3` on the archive it hands you, as
+ * `tools/fixtures/fold_2026_09_01_10_17.zip` does. So a genuine server export
+ * cannot be fed to the open-source pipeline unedited. That is upstream's own
+ * split; this page reads both, because both are files people have.
+ */
+describe("the version, and the two numberings", () => {
+  const versioned = (dialect, version) => JSON.stringify([{
+    name: "j", modelSeeds: ["1"], dialect, version,
+    sequences: [dialect === "alphafoldserver"
+      ? { proteinChain: { sequence: "ACDEFGHIK", count: 1 } }
+      : { protein: { id: "A", sequence: "ACDEFGHIK" } }],
+  }]);
+
+  it("reads the version the real server writes, and the one upstream expects", () => {
+    for (const version of [1, 3]) {
+      expect(jobFromJson(versioned("alphafoldserver", version)).seed).toBe(1);
+    }
+  });
+
+  it("reads every open-source version upstream lists", () => {
+    for (const version of [1, 2, 3, 4]) {
+      expect(jobFromJson(versioned("alphafold3", version)).seed).toBe(1);
+    }
+  });
+
+  // ...and refuses one it has not seen, because a later version may give a
+  // field we already read a different meaning - the failure that cannot be
+  // noticed from the outside.
+  it("refuses a version it has not seen", () => {
+    expect(refusal(versioned("alphafold3", 9))).toContain("version 9");
+    expect(refusal(versioned("alphafoldserver", 2))).toContain("version 2");
+  });
+
+  /**
+   * 🔴 BOTH OR NEITHER, which is upstream's rule verbatim. Neither means the
+   * server's dialect at its version 1; one without the other is a file someone
+   * hand-edited, and reading it means guessing which half was meant.
+   */
+  it("takes both fields or neither", () => {
+    expect(refusal(JSON.stringify([{ name: "j", modelSeeds: ["1"], version: 3,
+      sequences: [{ proteinChain: { sequence: "ACDEFGHIK", count: 1 } }] }])))
+      .toContain("only `version`");
+    const neither = jobFromJson(JSON.stringify([{ name: "j", modelSeeds: ["1"],
+      sequences: [{ proteinChain: { sequence: "ACDEFGHIK", count: 1 } }] }]));
+    expect(neither.dialect).toBe("alphafoldserver");
+  });
+});
+
+describe("several of something this page folds one of", () => {
+  // Loading the first is one of the things the file asked for; doing it
+  // without a word is what makes a five-job file look like a one-job answer.
+  it("says so rather than dropping the rest in silence", () => {
+    const two = JSON.parse(server([{ proteinChain: { sequence: "ACDEFGHIK", count: 1 } }]));
+    const job = jobFromJson(JSON.stringify([two[0], { ...two[0], name: "k" }]));
+    expect(job.notes.some((note) => note.includes("2 jobs"))).toBe(true);
+    expect(job.name).toBe("j");
+  });
+
+  it("says the same about seeds", () => {
+    const job = jobFromJson(open([{ protein: { id: "A", sequence: "ACDEFGHIK" } }],
+                                 { modelSeeds: [11, 12, 13] }));
+    expect(job.seed).toBe(11);
+    expect(job.notes.some((note) => note.includes("3 seeds"))).toBe(true);
+  });
+});
+
+/**
+ * 🔴 WRITE ONE AND READ IT BACK. This is the assertion the archive has never
+ * had: that `job_request.json` describes the job it was written for. It is
+ * also where the server dialect's limits show up honestly - it has one
+ * template flag and no room for which structure - so what comes back is
+ * asserted as what that dialect can say, not as what was typed.
+ */
+describe("the archive's own request, read back", () => {
+  const entities = [
+    { type: "protein", value: "ACSEFGHIK", copies: 2,
+      modifications: [{ code: "SEP", position: 3 }],
+      template: { kind: "pdb", source: "1QYS_A" } },
+    { type: "dna", value: "ACGTACGT", copies: 1, modifications: [] },
+    { type: "ligand", value: "GOL", copies: 1, modifications: [] },
+  ];
+
+  it("comes back as the same job", () => {
+    const job = jobFromJson(jobRequestJson({ name: "af3_1", seed: 42, entities }));
+    expect(job.name).toBe("af3_1");
+    expect(job.seed).toBe(42);
+    expect(job.entities.map((entity) => [entity.type, entity.value, entity.copies]))
+      .toEqual([["protein", "ACSEFGHIK", 2], ["dna", "ACGTACGT", 1],
+                ["ligand", "GOL", 1]]);
+    expect(job.entities[0].modifications).toEqual([{ code: "SEP", position: 3 }]);
+  });
+
+  /**
+   * 🔴 THE ONE THING THE SERVER DIALECT CANNOT CARRY, STATED. `1QYS_A` goes in
+   * and "search for a template" comes back, because `useStructureTemplate` is
+   * a boolean and the dialect has no field for which structure. That is a real
+   * loss and it is written down here rather than discovered by someone whose
+   * re-fold used a different template than the one they picked.
+   */
+  it("loses which template, and keeps that a template was asked for", () => {
+    const job = jobFromJson(jobRequestJson({ name: "af3_1", seed: 0, entities }));
+    expect(job.entities[0].template).toEqual({ kind: "search" });
+  });
+});

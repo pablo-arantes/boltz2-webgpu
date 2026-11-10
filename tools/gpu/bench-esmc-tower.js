@@ -1,0 +1,167 @@
+// What does an ESM-C block actually cost, and what is the tower's overhead?
+//
+//     node tools/gpu-chrome.mjs tools/gpu/bench-esmc-tower.js --tokens=61,150,300
+//
+// 🔴 THE WEIGHTS ARE UPLOADED ONCE AND THE BLOCK IS RUN MANY TIMES. A block is
+// 64 MiB of float32; timing a call that uploads them measures the bus, and the
+// tower's own 3.7 s at 61 tokens is mostly 36 submits and a shard fetch each.
+// Those are real costs and they are reported separately - what they are not is
+// the arithmetic.
+//
+// 🔴 AND THE ARMS ARE MEDIANS, INTERLEAVED IN ONE PROCESS. This M2 drifts by up
+// to 3.2x between runs, so two arms timed in two runs are not a comparison -
+// which is a mistake this bench made before it could interleave: f16 weights
+// measured 8% faster and a hoisted bounds test 8% slower, in separate runs, and
+// neither difference survived being measured properly. Round-robin, medians.
+//
+// 🔴 AND THE OUTPUT IS CHECKED, BECAUSE A DISPATCH THAT LEAVES ROWS
+// UNPROCESSED READS AS A SPEEDUP. Every round's result is compared to the
+// first: a shape whose grid does not cover its rows is faster and wrong, and
+// this repository has been fooled by exactly that.
+import { EsmcBlockGpu } from "../../webgpu/esmc/block.js";
+
+const option = (args, name, fallback) => {
+  const prefix = `--${name}=`;
+  return (args ?? []).find((a) => a.startsWith(prefix))?.slice(prefix.length) ?? fallback;
+};
+
+const deterministic = (count, seed) => {
+  const out = new Float32Array(count);
+  let state = seed >>> 0;
+  for (let i = 0; i < count; i += 1) {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    out[i] = ((state >>> 8) / 8388608 - 1) * 0.05;
+  }
+  return out;
+};
+
+const median = (values) => {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[sorted.length >> 1];
+};
+
+export async function main(device, args = []) {
+  const tokenCounts = option(args, "tokens", "61,150,300").split(",").map(Number);
+  const rounds = Number(option(args, "rounds", "9"));
+  const layers = Number(option(args, "layers", "36"));
+  const weightPrecision = option(args, "weights", "f32");
+  const model = 1152, heads = 18, ffn = 3072;
+
+  const weights = {
+    "attn_norm/scale": deterministic(model, 1),
+    "attn_norm/offset": deterministic(model, 2),
+    "qkv/weights": deterministic(3 * model * model, 3),
+    "q_norm/scale": deterministic(model, 4),
+    "k_norm/scale": deterministic(model, 5),
+    "attn_out/weights": deterministic(model * model, 6),
+    "ffn_norm/scale": deterministic(model, 7),
+    "ffn_norm/offset": deterministic(model, 8),
+    "fc1/weights": deterministic(2 * ffn * model, 9),
+    "fc2/weights": deterministic(model * ffn, 10),
+  };
+
+  const block = new EsmcBlockGpu(device);
+  // An arm is a kernel configuration; they are timed round-robin so the drift
+  // lands on all of them equally.
+  const arms = option(args, "arms", "f16-u1,f16-u2,f16-u4").split(",").map((name) => ({
+    name,
+    weightPrecision: name.startsWith("f16") ? "f16" : "f32",
+    boundsTest: name.endsWith("-bounds"),
+    rowTile: Number((name.match(/-t(\d+)/) ?? [, "4"])[1]),
+    queryTile: Number((name.match(/-q(\d+)/) ?? [, "8"])[1]),
+    unroll: Number((name.match(/-u(\d+)/) ?? [, "4"])[1]),
+  }));
+  const rows = [];
+  for (const tokens of tokenCounts) {
+    const input = deterministic(tokens * model, 11 + tokens);
+    const shape = { rows: tokens, model, heads, ffn, residualScale: 1 };
+
+    let reference = null;
+    const timings = new Map(arms.map((arm) => [arm.name, []]));
+    // 🔴 WHAT AN ARM ACTUALLY CHANGES, NOT ONLY WHAT IT COSTS. An arm that is
+    // bit-identical to the first is an arm that did not take effect, and a
+    // speed difference next to a zero divergence is a measurement of nothing.
+    //
+    // 🔴 BUT THIS NUMBER IS NOT WHAT f16 COSTS ESM-C. These weights are
+    // synthesised at full float32 precision; the real checkpoint is bfloat16
+    // widened to float32, so narrowing it to f16 is lossless (relRMS 1.58e-8).
+    // Time on synthetic weights, price precision on real ones.
+    const divergence = new Map();
+    for (let round = 0; round < rounds; round += 1) {
+      for (const arm of arms) {
+      const result = await block.run(input, shape, weights, arm);
+      timings.get(arm.name).push(result.elapsedMilliseconds);
+      if (reference === null) {
+        reference = result.output;
+        let finite = true;
+        for (let i = 0; i < reference.length; i += 1) {
+          if (!Number.isFinite(reference[i])) { finite = false; break; }
+        }
+        if (!finite) throw new Error(`${tokens} tokens produced a non-finite output`);
+      } else {
+        // 🔴 THE ARMS MUST AGREE, AND f16 WEIGHTS DO NOT AGREE EXACTLY. A
+        // dispatch that fails to cover its rows is faster and wrong, so every
+        // arm is compared to the first - to the last bit within a precision,
+        // and to a bound across one.
+        let worst = 0;
+        for (let i = 0; i < reference.length; i += 1) {
+          worst = Math.max(worst, Math.abs(result.output[i] - reference[i]));
+        }
+        divergence.set(arm.name, worst);
+        const allowed = arm.weightPrecision === arms[0].weightPrecision ? 0 : 1e-2;
+        if (worst > allowed) {
+          throw new Error(`${arm.name} at ${tokens} tokens differs by ${worst}`
+            + " - a dispatch that does not cover its rows reads as a speedup");
+        }
+      }
+      }
+    }
+
+    // Matmuls only: qkv, out, fc1, fc2, plus the two attention products.
+    const perToken = 2 * (model * 3 * model + model * model
+      + model * 2 * ffn + ffn * model);
+    const attention = 2 * 2 * tokens * tokens * model;
+    const flops = perToken * tokens + attention;
+    const blockMs = median(timings.get(arms[0].name));
+    // 🔴 THE TRAFFIC IS WHAT THIS KERNEL IS ACTUALLY SPENDING. One workgroup a
+    // ROW means every row re-reads the whole weight matrix from global memory,
+    // so the weight traffic is rows x 63.7 MB rather than 63.7 MB - and at 300
+    // tokens that is 19.1 GB in 218 ms, which is 87.6 GB/s against this M2's
+    // ~100. The kernel is not slow at arithmetic; it is at the bandwidth limit
+    // doing 300 times the reads it needs. Row tiling is the fix, and
+    // transition.js already records what it is worth there: tiling by
+    // four took that kernel from 241 ms to 85.
+    const weightBytes = (model * 3 * model + model * model
+      + 2 * ffn * model + model * ffn) * 4;
+    const trafficGb = (weightBytes * tokens) / 1e9;
+    const perArm = {};
+    for (const arm of arms) {
+      const ms = median(timings.get(arm.name));
+      perArm[arm.name] = {
+        milliseconds: Number(ms.toFixed(2)),
+        gflops: Number((flops / (ms / 1000) / 1e9).toFixed(1)),
+        relativeToFirst: Number((median(timings.get(arms[0].name)) / ms).toFixed(3)),
+        maxAbsoluteDifferenceFromFirst: divergence.get(arm.name) ?? 0,
+      };
+    }
+    rows.push({
+      arms: perArm,
+      tokens,
+      blockMilliseconds: Number(blockMs.toFixed(3)),
+      blockGflops: Number((flops / (blockMs / 1000) / 1e9).toFixed(1)),
+      towerSeconds: Number((blockMs * layers / 1000).toFixed(2)),
+      towerGflop: Number((flops * layers / 1e9).toFixed(1)),
+      weightTrafficGb: Number(trafficGb.toFixed(2)),
+      effectiveGbPerSecond: Number((trafficGb / (blockMs / 1000)).toFixed(1)),
+      spread: Number((Math.max(...timings) / Math.min(...timings)).toFixed(2)),
+    });
+  }
+
+  return {
+    weightPrecision,
+    note: "one block, weights resident, median of " + rounds
+      + " rounds; tower figures are that block x " + layers,
+    layers,
+    rows,
+  };
+}
