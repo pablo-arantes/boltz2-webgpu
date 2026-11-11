@@ -27,7 +27,8 @@ import { parseSmiles } from "../shared/chem/smiles.js";
 import { parseSmi, uniqueIds, describeSmi } from "../shared/input/smi.js";
 import { alignmentForScreen } from "../shared/input/msa-cache.js";
 import { generateMmseqs2Msa } from "../shared/input/mmseqs2-api.js";
-import { ScreenScene, scoreDomain, renumberLigand } from "./screen-scene.js";
+import { ScreenScene, scoreDomain, scoreColour, renumberLigand }
+  from "./screen-scene.js";
 import { drawScatter, drawTable, DEFAULT_SORT, startsDescending }
   from "./screen-view.js";
 import { screenArchive, statusOf } from "./screen-export.js";
@@ -38,6 +39,10 @@ const state = {
   jobs: [],
   scene: new ScreenScene(),
   visible: new Set(),
+  // {id, chain, resSeq} per visible ligand in the scene as last drawn, so a
+  // colour change can repaint without re-loading (which resets the camera)
+  scenePlaced: [],
+
   sort: { ...DEFAULT_SORT },
   colourBy: "affinity_probability_binary",
   running: false,
@@ -156,6 +161,7 @@ function refresh() {
     $("caveats").textContent = caveatsFor(state.results);
   });
   $("download").disabled = state.results.length === 0;
+  renderLigandPicker();
   renderQueue();
 }
 
@@ -208,6 +214,95 @@ function revealViewer() {
 }
 
 /**
+ * Paint the ligands in the scene with the colour the table and scatter use.
+ *
+ * 🔴 THIS IS WHY `COLOUR BY` DID NOTHING TO THE 3D VIEW. `drawScene` computed
+ * the domain and threw it away - the scene was handed to py2Dmol with no colour
+ * at all, so every ligand came out in the viewer's own per-chain palette and
+ * changing the control moved the scatter and the table while the picture stayed
+ * a fixed rainbow. The note under the viewer admitted it ("scene colours are
+ * the viewer's own, not the score"), which made a missing feature read as a
+ * deliberate one.
+ *
+ * 🔴 AND IT IS A PER-CHAIN COLOUR MAP ON THE OBJECT, NOT A COLOUR MODE.
+ * py2Dmol's `getAtomColor` resolves `objectsData[name].color` of
+ * `{type: "advanced", value: {chain: {...}}}` BEFORE falling back to
+ * `colorMode`, so naming only the ligands' letters colours exactly them and
+ * leaves the target to the viewer's own cartoon colouring - which is what makes
+ * the protein still read as a protein. The alternatives were worse: a custom
+ * entry in `window.py2dmol_customColors` is a whole colour MODE and would have
+ * to answer for the target's atoms too, and writing the score into the B-factor
+ * column to borrow `plddt` would overwrite a real per-atom confidence and give
+ * colours that no longer match the table's swatch.
+ *
+ * 🔴 `setColor` IS NOT AVAILABLE HERE. That method is attached by `py2Dmol.show`
+ * to the renderer it creates; this page is the auto-initialised path
+ * (`initializePy2DmolViewer` over the copied subtree), whose renderer has no
+ * such method - so the object's `color` field is written directly, in the same
+ * shape `setColor` would have written, and the two `*NeedUpdate` flags the
+ * vendor's own setter sets are set with it or the cached colour buffer is
+ * redrawn unchanged.
+ *
+ * 🔴 AND IT IS KEYED ON THE POSITION, WITH THE CHAIN AS A FALLBACK. A chain
+ * map alone caps the scene at ~25 distinguishable ligands, because a PDB chain
+ * is one character and the letters wrap - so on the 100-ligand screen this page
+ * is for, ligand 26 would be painted in ligand 1's colour and a reader would
+ * have no way to tell. py2Dmol resolves `position` AFTER `chain`, so writing
+ * both means the per-atom map wins where it is present and the per-chain map
+ * still colours correctly if the renderer's arrays are not where they are
+ * expected. The position map is built by matching the renderer's OWN `chains`
+ * and `residueNumbers` arrays against the pairs `drawScene` handed it, rather
+ * than by assuming the viewer kept every atom in file order.
+ *
+ * @param {{id: string, chain: string, resSeq: number}[]} placed
+ *   where each visible ligand landed, from `drawScene`
+ * @returns {boolean} whether a viewer was found to paint
+ */
+function paintScene(placed) {
+  const done = state.results.filter((result) => statusOf(result) === "done");
+  const domain = scoreDomain(done, state.colourBy);
+  const chain = {};
+  const wanted = new Map();
+  for (const spot of placed) {
+    const result = done.find((entry) => entry.id === spot.id);
+    const colour = scoreColour(result?.[state.colourBy],
+                               domain.lo, domain.hi);
+    chain[spot.chain] = colour;
+    wanted.set(`${spot.chain}|${spot.resSeq}`, colour);
+  }
+  try {
+    const registry = globalThis.py2dmol_viewers ?? {};
+    const renderer = registry[Object.keys(registry)[0]]?.renderer;
+    const objects = renderer?.objectsData;
+    if (objects === undefined || objects === null) return false;
+    const position = {};
+    const chains = renderer.chains ?? [];
+    const residues = renderer.residueNumbers ?? [];
+    for (let at = 0; at < chains.length; at += 1) {
+      const colour = wanted.get(`${chains[at]}|${residues[at]}`);
+      if (colour !== undefined) position[at] = colour;
+    }
+    // The loader sets `currentObjectName`; the scene is one object, so every
+    // key is the same object. Both are tried rather than assuming the name
+    // py2Dmol derives from "screen.pdb".
+    const names = Object.hasOwn(objects, renderer.currentObjectName)
+      ? [renderer.currentObjectName] : Object.keys(objects);
+    if (names.length === 0) return false;
+    for (const name of names) {
+      if (objects[name] === undefined) continue;
+      objects[name].color = { type: "advanced", value: { chain, position } };
+    }
+    renderer.colorsNeedUpdate = true;
+    renderer.plddtColorsNeedUpdate = true;
+    renderer.render?.("screen-colour");
+    return true;
+  } catch (error) {
+    console.error("the scene could not be coloured", error);
+    return false;
+  }
+}
+
+/**
  * Hand the scene to py2Dmol.
  *
  * 🔴 ONE OBJECT PER UPDATE, NOT ONE PER LIGAND, AND THE COST IS NAMED. py2Dmol
@@ -222,8 +317,6 @@ function revealViewer() {
 function drawScene() {
   const load = globalThis.py2dmolLoadFiles;
   if (typeof load !== "function" || state.scene.target === null) return;
-  const done = state.results.filter((result) => statusOf(result) === "done");
-  const domain = scoreDomain(done, state.colourBy);
   const target = state.scene.target.replace(/\nEND\s*$/, "");
   const parts = [target];
   // 🔴 EVERY LIGAND IS RENUMBERED INTO THE SCENE'S OWN SERIAL/CHAIN/RESIDUE
@@ -233,9 +326,31 @@ function drawScene() {
   // leaves the others as loose spheres. See renumberLigand.
   let serial = 1 + (target.match(/^(ATOM|HETATM)/gm) ?? []).length;
   let resSeq = 1;
-  const letters = "BCDEFGHIJKLMNOPQRSTUVWXYZ";
+  // 🔴 AND THE LETTERS SKIP THE TARGET'S OWN. A ligand handed a chain letter
+  // the target already uses lands inside that chain's residue numbering, where
+  // `resSeq` 1 is a real residue - so the viewer's residue machinery would
+  // treat the ligand and that residue as one thing. This page takes a single
+  // sequence, so in practice the target is chain A and "B" onwards was safe;
+  // reading the letters off the target rather than assuming makes it true
+  // instead of lucky.
+  const taken = new Set([...target.matchAll(/^(?:ATOM|HETATM).{15}(.)/gm)]
+    .map((match) => match[1]));
+  const letters = [..."BCDEFGHIJKLMNOPQRSTUVWXYZA"]
+    .filter((letter) => !taken.has(letter));
+  // 🔴 AND WHERE EACH LIGAND LANDED IS KEPT, because that is how the score
+  // reaches the picture: nothing else connects a row in the table to atoms on
+  // screen. It is the (chain, residue) PAIR rather than the letter, because a
+  // PDB chain is one character and past ~25 ligands the letters wrap - see
+  // `paintScene`.
+  const placed = [];
+  state.scenePlaced = placed;
+  // 🔴 PUBLISHED FOR THE PROBE, like `__screenResults` and `__scenePdb`: the
+  // only way to check a ligand is the colour its score asks for is to know
+  // which atoms became it, and that mapping exists nowhere in the DOM.
+  globalThis.__scenePlaced = placed;
   for (const entry of state.scene.visible()) {
     const chain = letters[(resSeq - 1) % letters.length];
+    placed.push({ id: entry.id, chain, resSeq });
     const renumbered = renumberLigand(entry.ligand, serial, chain, resSeq);
     parts.push(renumbered.pdb);
     serial = renumbered.nextSerial;
@@ -278,7 +393,15 @@ function drawScene() {
       .then((result) => { record.settled = result ?? null; })
       .catch((error) => { record.error = String(error?.message ?? error); });
     Promise.resolve(loaded)
-      .then(() => { revealViewer(); requestAnimationFrame(revealViewer); })
+      // 🔴 PAINTED AFTER THE LOAD SETTLES, NOT BEFORE IT. The colour lives on
+      // the OBJECT py2Dmol builds while ingesting the file, so a paint issued
+      // first has nothing to write to; the synchronous attempt below is for the
+      // re-colour case, where the object is already there from a previous draw.
+      .then(() => {
+        revealViewer();
+        paintScene(placed);
+        requestAnimationFrame(revealViewer);
+      })
       // 🔴 AN ASYNC REFUSAL MUST BE REPORTED, NOT SWALLOWED. `py2dmolLoadFiles`
       // is `processFiles`, which is async: the synchronous `catch` below cannot
       // see it reject, so an empty handler here turns a failed load into a
@@ -291,8 +414,13 @@ function drawScene() {
     say(`the viewer refused the scene: ${error?.message ?? error}`, true);
     return;
   }
-  // The legend under the viewer carries the colour meaning, since the viewer
-  // itself is drawing one structure and knows nothing about scores.
+  drawSceneNote();
+}
+
+/**
+ * The line under the viewer, which has to carry what the picture cannot.
+ */
+function drawSceneNote() {
   const rms = state.scene.ligands
     .map((entry) => entry.rms).filter((value) => Number.isFinite(value));
   // 🔴 A LIGAND WHOSE FIT WAS DECLINED IS NOT SUPERPOSED, AND WAS COUNTED AS
@@ -312,12 +440,57 @@ function drawScene() {
     + (unfitted.length === 0 ? ""
       : `  ·  ⚠ ${unfitted.length} NOT superposed`
         + ` (${unfitted.join(", ")}) - drawn in its own frame`)
-    // 🔴 NO COLOUR CLAIM. This printed the score range as though the scene were
-    // coloured by it; nothing passes a colour to py2Dmol, so the viewer uses
-    // its own default and the claim was false. The table swatch and the
-    // scatter do share a colour; the 3D scene does not, and saying so beats
-    // asserting a mapping that was never applied.
-    + "  ·  scene colours are the viewer's own, not the score";
+    // 🔴 THE COLOUR CLAIM IS BACK, AND ONLY BECAUSE IT IS NOW TRUE. This line
+    // read "scene colours are the viewer's own, not the score" for as long as
+    // `drawScene` computed a domain and discarded it; `paintScene` writes the
+    // per-chain colours the table and scatter use, so the ramp is shared and
+    // the numbers at its ends are what tell a reader what a colour means.
+    // 🔴 AND IT PRINTS THE DOMAIN, NOT JUST "coloured by score", because the
+    // ramp spans THIS RUN's range (see scoreColour's note): without the two
+    // numbers an orange ligand looks like a strong binder when it may only be
+    // the best of a weak set.
+    + `  ·  ${colourLegend()}`;
+}
+
+/** What the colour ramp means, in this run's own numbers. */
+function colourLegend() {
+  const done = state.results.filter((result) => statusOf(result) === "done");
+  const domain = scoreDomain(done, state.colourBy);
+  const label = $("colour-by")?.selectedOptions?.[0]?.textContent
+    ?? state.colourBy;
+  if (!Number.isFinite(domain.lo) || !Number.isFinite(domain.hi)) {
+    return "ligands uncoloured until a ligand scores";
+  }
+  const digits = state.colourBy === "affinity_pred_value" ? 2 : 3;
+  return `ligands blue ${domain.lo.toFixed(digits)} →`
+    + ` orange ${domain.hi.toFixed(digits)} (${label.replace(/\s*\(.*/, "")},`
+    + " warm is better); target in the viewer's own colours";
+}
+
+/**
+ * The "show" picker: every scored ligand, plus all of them at once.
+ *
+ * 🔴 IT LISTS WHAT IS IN THE SCENE, NOT WHAT WAS SUBMITTED. A ligand that
+ * failed has no structure to show, and a ligand still running has none yet;
+ * offering either gives a reader an option that blanks the viewer.
+ */
+function renderLigandPicker() {
+  const picker = $("show-ligand");
+  if (picker === null) return;
+  const ligands = state.scene.ligands;
+  const options = [
+    { value: "", label: `All ligands (${ligands.length})` },
+    ...ligands.map((entry) => ({ value: entry.id, label: entry.id })),
+  ];
+  picker.replaceChildren(...options.map(({ value, label }) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    return option;
+  }));
+  const shown = ligands.filter((entry) => entry.visible);
+  picker.value = shown.length === 1 && ligands.length > 1 ? shown[0].id : "";
+  picker.disabled = ligands.length === 0;
 }
 
 async function boot() {
@@ -587,6 +760,30 @@ function wire() {
   });
   $("colour-by").addEventListener("change", () => {
     state.colourBy = $("colour-by").value;
+    // 🔴 REPAINTED, NOT RE-LOADED. Handing py2Dmol the same structure again
+    // makes its loader fit the camera to it afresh, so re-drawing the scene to
+    // change a colour threw away whatever the reader had rotated to. The atoms
+    // have not changed; only their colour has.
+    if (!paintScene(state.scenePlaced)) drawScene();
+    drawSceneNote();
+    refresh();
+  });
+  // 🔴 ONE LIGAND AT A TIME IS A VISIBILITY CHANGE, SO IT **DOES** RE-LOAD.
+  // The whole visible scene is concatenated into one object (see drawScene's
+  // note), so which ligands are in it is decided when the file is built.
+  $("show-ligand").addEventListener("change", () => {
+    // 🔴 THE PICKER HOLDS NO STATE OF ITS OWN, and that is what keeps it
+    // honest. The per-row checkboxes in the table set the same visibility, so a
+    // remembered "showing only X" would go stale the moment a reader ticked a
+    // second row - the picker would still read one ligand while two were drawn.
+    // It writes the visible set and is re-derived from it on every refresh.
+    const only = $("show-ligand").value;
+    for (const entry of state.scene.ligands) {
+      const visible = only === "" || only === entry.id;
+      state.scene.setVisible(entry.id, visible);
+      if (visible) state.visible.add(entry.id);
+      else state.visible.delete(entry.id);
+    }
     drawScene();
     refresh();
   });

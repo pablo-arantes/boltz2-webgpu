@@ -535,6 +535,17 @@ only the page is new.
         <div id="msa-viewer-container"></div>
         <div id="msa-buttons"></div>
       </div>
+      <!-- 🔴 THE PICKER IS **OURS**, NOT py2Dmol's OBJECT LIST. The viewer's own
+           dropdown reads "screen" because the whole visible scene is ONE
+           object (drawScene's note says why), so it can never list ligands;
+           this one does, and drives the same visibility the table's checkboxes
+           do. -->
+      <div class="row" style="margin-top:0.5rem">
+        <label for="show-ligand">Show</label>
+        <select id="show-ligand" disabled>
+          <option value="">All ligands</option>
+        </select>
+      </div>
       <div class="row" style="margin-top:0.5rem">
         <label for="colour-by">Colour by</label>
         <select id="colour-by">

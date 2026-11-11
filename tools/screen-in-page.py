@@ -397,6 +397,240 @@ def main():
             failures.append("the viewer holds no coordinates - the scene is"
                             f" blank ({atoms})")
 
+        # 🔴 AND THE COLOUR BY CONTROL MUST REACH THE ATOMS. It did not: the
+        # page computed a score domain in `drawScene` and never used it, so the
+        # 3D ligands came out in py2Dmol's own per-chain palette and the control
+        # moved only the scatter and the table. Reading the page's own state
+        # cannot see this - the select's value changed, the table recoloured,
+        # and the picture did not. So this asks the RENDERER what colour it
+        # would paint one atom of each ligand, which is the only number that
+        # answers "did this ligand change colour".
+        #
+        # 🔴 AND THE TEST IS THE RAMP'S **ORIENTATION**, NOT "something moved".
+        # The first version of this gate required the colours to change when the
+        # column changed, and failed on a correct page: with two ligands the
+        # ends of the ramp are always one blue and one orange, so unless the two
+        # columns disagree about which ligand is better, the right answer is
+        # that nothing moves. What can be asserted for every column is that the
+        # WARM end is the ligand that column calls best - which is also the
+        # check that catches `affinity_pred_value` being drawn the wrong way up,
+        # the one real hazard here (lower is better for that column alone).
+        # 🔴 PER LIGAND, NOT PER CHAIN LETTER. A PDB chain is one character, so
+        # a screen past ~25 ligands reuses letters and "the first atom of chain
+        # B" is two different ligands - a reading that would have hidden exactly
+        # the colour collision the page now avoids by keying on the (chain,
+        # residue) pair. This resolves each ligand to its own atoms through the
+        # pair the page recorded, and asks the renderer for that atom's colour.
+        probe_colours = """(() => {
+          const reg = globalThis.py2dmol_viewers ?? {};
+          const r = reg[Object.keys(reg)[0]]?.renderer;
+          if (!r || !r.chains) return null;
+          const placed = globalThis.__scenePlaced ?? [];
+          const at = new Map();
+          for (let i = 0; i < r.chains.length; i += 1) {
+            const key = `${r.chains[i]}|${(r.residueNumbers ?? [])[i]}`;
+            if (!at.has(key)) at.set(key, i);
+          }
+          const rgb = (i) => {
+            if (i === undefined) return null;
+            const c = r.getAtomColor(i);
+            return `${c?.r},${c?.g},${c?.b}`;
+          };
+          const out = { ligands: {}, chains: {}, positions: r.chains.length };
+          for (const spot of placed) {
+            out.ligands[spot.id] = rgb(at.get(`${spot.chain}|${spot.resSeq}`));
+          }
+          const seen = new Set(placed.map((spot) => spot.chain));
+          for (let i = 0; i < r.chains.length; i += 1) {
+            if (seen.has(r.chains[i])) continue;
+            out.chains[r.chains[i]] ??= rgb(i);
+          }
+          return out;
+        })()"""
+        WARM, COOL = "214,108,20", "49,86,184"
+        scores = cdp.evaluate(ws, """(globalThis.__screenResults ?? [])
+          .filter((r) => typeof r.affinity_probability_binary === 'number')
+          .map((r) => ({ id: r.id,
+                         affinity_probability_binary: r.affinity_probability_binary,
+                         affinity_pred_value: r.affinity_pred_value,
+                         iptm: r.iptm }))""")
+        for column, lower_is_better in (("affinity_probability_binary", False),
+                                        ("affinity_pred_value", True),
+                                        ("iptm", False)):
+            cdp.evaluate(ws, """(() => {
+              const select = document.getElementById('colour-by');
+              select.value = %s;
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+            })()""" % json.dumps(column))
+            time.sleep(0.4)
+            painted = cdp.evaluate(ws, probe_colours)
+            print(f"atom colour by {column}:", painted)
+            if painted is None:
+                failures.append("the renderer could not be asked for atom"
+                                f" colours ({column})")
+                continue
+            # the target keeps the viewer's own colours; every ligand must
+            # resolve to a colour, and to the score's colour
+            if len(painted["ligands"]) != len(ligands):
+                failures.append(f"{len(painted['ligands'])} ligands resolved to"
+                                f" atoms for {len(ligands)} in the scene"
+                                f" ({painted})")
+                continue
+            if None in painted["ligands"].values():
+                failures.append("a ligand's atoms could not be found by its"
+                                f" (chain, residue) pair ({painted})")
+            if len(set(painted["ligands"].values())) < 2:
+                failures.append("every ligand is the same colour - the score"
+                                f" ramp is not reaching the scene ({painted})")
+            ranked = sorted((row for row in scores
+                             if isinstance(row.get(column), (int, float))),
+                            key=lambda row: row[column],
+                            reverse=not lower_is_better)
+            if len(ranked) < 2:
+                continue
+            best, worst = ranked[0]["id"], ranked[-1]["id"]
+            got_best = painted["ligands"].get(best)
+            got_worst = painted["ligands"].get(worst)
+            if got_best != WARM or got_worst != COOL:
+                failures.append(
+                    f"colouring by {column}: the best ligand {best} is"
+                    f" {got_best} and the worst {worst} is {got_worst} -"
+                    f" expected warm {WARM} and cool {COOL} (the ramp is"
+                    f" upside down or not applied) ({painted})")
+            # 🔴 AND EVERY LIGAND IN BETWEEN, NOT JUST THE TWO ENDS. The ends
+            # are right by luck on any scene where the colours merely happen to
+            # be spread; what makes the picture readable is that WARMER ALWAYS
+            # MEANS BETTER, for every pair. This is also the only check that
+            # catches a chain-letter collision past 25 ligands: a ligand
+            # painted in another's colour breaks the order without touching
+            # either end. Warmth is red-minus-blue, which rises strictly along
+            # every segment of this ramp.
+            warmth = []
+            for row in ranked:
+                rgb = painted["ligands"].get(row["id"])
+                if rgb is None:
+                    continue
+                r, _, b = (int(part) for part in rgb.split(","))
+                warmth.append((row["id"], r - b))
+            backwards = [(warmth[i - 1], warmth[i])
+                         for i in range(1, len(warmth))
+                         if warmth[i - 1][1] < warmth[i][1]]
+            if backwards:
+                failures.append(
+                    f"colouring by {column}: {len(backwards)} pair(s) of"
+                    " ligands are drawn with the worse one WARMER, so the"
+                    f" ramp does not follow the ranking - first {backwards[0]}"
+                    f" of {len(warmth)} ligands")
+        # 🔴 AND THE COLUMNS MUST BE MADE TO DISAGREE, or the check above
+        # passes on a page that ignores the control. Every column ranked these
+        # two ligands the same way - the bigger one wins on probability, on
+        # pIC50 and on ipTM - so blue and orange land on the same chains
+        # whatever is selected, and a page HARDWIRED to the classifier would
+        # have satisfied all three rounds. This flips one ligand's ipTM so the
+        # order is reversed, requires the warm end to move with it, and puts the
+        # numbers back: it is the difference between "the ramp reaches the
+        # scene" and "the ramp follows the control".
+        flipped = cdp.evaluate(ws, """(() => {
+          const results = (globalThis.__screenResults ?? [])
+            .filter((r) => typeof r.iptm === 'number');
+          if (results.length < 2) return null;
+          const saved = results.map((r) => [r.id, r.iptm]);
+          const order = [...results].sort((a, b) => b.iptm - a.iptm);
+          // give the WORST-ipTM ligand the best ipTM, and the other the worst
+          const top = order[0].iptm, bottom = order[order.length - 1].iptm;
+          order[0].iptm = bottom;
+          order[order.length - 1].iptm = top;
+          const select = document.getElementById('colour-by');
+          select.value = 'iptm';
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+          return { saved, best: order[order.length - 1].id };
+        })()""")
+        if flipped is None:
+            failures.append("no ipTM to flip - the disagreement check could"
+                            " not run")
+        else:
+            time.sleep(0.4)
+            painted = cdp.evaluate(ws, probe_colours)
+            print("atom colour with ipTM reversed:", painted,
+                  "expecting warm on", flipped["best"])
+            got = (painted or {"ligands": {}})["ligands"].get(flipped["best"])
+            if got != WARM:
+                failures.append(
+                    f"with ipTM reversed the warm colour should move to"
+                    f" {flipped['best']}, which is {got} - COLOUR BY is not"
+                    f" choosing the column the scene is painted by ({painted})")
+            cdp.evaluate(ws, """((saved) => {
+              const by = new Map(saved);
+              for (const r of globalThis.__screenResults ?? []) {
+                if (by.has(r.id)) r.iptm = by.get(r.id);
+              }
+              const select = document.getElementById('colour-by');
+              select.value = 'affinity_probability_binary';
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+            })(%s)""" % json.dumps(flipped["saved"]))
+            time.sleep(0.4)
+            restored = cdp.evaluate(ws, """(globalThis.__screenResults ?? [])
+              .map((r) => [r.id, r.iptm])""")
+            if restored != [list(pair) for pair in flipped["saved"]]:
+                failures.append("the probe failed to put the ipTM values back"
+                                f" ({restored} vs {flipped['saved']})")
+
+        # 🔴 AND THE TARGET IS NOT ON THE RAMP. Only the ligands are scored, so
+        # the protein must keep the viewer's own colouring - which is also what
+        # makes it still read as a protein. A colour MODE, or the score written
+        # into the B-factor column to borrow `plddt`, would have painted it too.
+        final = cdp.evaluate(ws, probe_colours)
+        if final is not None:
+            print("non-ligand chains:", final["chains"])
+            on_ramp = {chain: colour for chain, colour in final["chains"].items()
+                       if colour in (WARM, COOL)}
+            if on_ramp:
+                failures.append("the TARGET is painted with the score ramp"
+                                f" ({on_ramp})")
+
+        # 🔴 AND THE SHOW PICKER MUST ACTUALLY REMOVE LIGANDS FROM THE SCENE.
+        # The scene is one concatenated object, so hiding is a re-draw with
+        # fewer ligands in the file - a picker that only set a variable would
+        # leave the picture unchanged, which is the failure this whole pass is
+        # about.
+        picker = cdp.evaluate(ws, """(() => {
+          const select = document.getElementById('show-ligand');
+          return { options: [...select.options].map((o) => o.value),
+                   value: select.value, disabled: select.disabled };
+        })()""")
+        print("show picker:", picker)
+        if picker["options"][:1] != [""]:
+            failures.append(f"the show picker has no all-ligands option"
+                            f" ({picker})")
+        if len(picker["options"]) != len(ligands) + 1:
+            failures.append(f"the show picker lists {len(picker['options'])}"
+                            f" entries for {len(ligands)} ligands ({picker})")
+        one = picker["options"][1] if len(picker["options"]) > 1 else None
+        if one is not None:
+            cdp.evaluate(ws, """(() => {
+              const select = document.getElementById('show-ligand');
+              select.value = %s;
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+            })()""" % json.dumps(one))
+            time.sleep(0.5)
+            alone = cdp.evaluate(ws, probe_colours)
+            print(f"atom colour per chain (only {one}):", alone)
+            if alone is None or len(alone["ligands"]) != 1:
+                failures.append(f"picking one ligand left {alone} in the scene")
+            elif list(alone["ligands"]) != [one]:
+                failures.append(f"picking {one} drew"
+                                f" {list(alone['ligands'])} instead")
+            cdp.evaluate(ws, """(() => {
+              const select = document.getElementById('show-ligand');
+              select.value = '';
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+            })()""")
+            time.sleep(0.5)
+            back = cdp.evaluate(ws, probe_colours)
+            if back is None or len(back["ligands"]) != len(ligands):
+                failures.append("all-ligands did not restore the scene"
+                                f" ({back})")
+
         # 🔴 EVERY HAND-OVER MUST ADD A FRAME. `processFiles` reports
         # `objectsLoaded` as the number of files it MEANT to load, so it said 1
         # while py2Dmol held nothing; `framesAdded` is the number that actually

@@ -153,3 +153,15 @@ tr.skipped td { color: var(--muted); }
 #viewer-container .py2dmol-slot,
 #viewer-container .py2dmol-slot > .py2dmol-slot-body { width: 100%; }
 #viewer-container #canvasContainer { width: 100%; height: 600px; }
+
+/* 🔴 py2Dmol's OWN OBJECT PICKER IS HIDDEN, because on this page it is a
+   control that cannot do anything and it was read as the one that can. The
+   whole visible scene is concatenated into a SINGLE object (web/screen.js's
+   `drawScene` says why), so the vendor's dropdown has exactly one entry, named
+   "screen" - and a reader looking for a way to isolate one binder found that
+   dropdown first and reasonably expected the binders to be in it. The real
+   picker is `#show-ligand`, a few rows down, which rebuilds the scene from the
+   ligands it lists. The select is left in the DOM rather than removed: the
+   renderer's change listener, the prev/next buttons and a restored session all
+   drive the current object through it. */
+#viewer-container #objectRow { display: none; }

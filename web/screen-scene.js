@@ -178,6 +178,13 @@ export function renumberLigand(pdb, firstSerial, chain, resSeq) {
   for (const line of lines) {
     if (line.startsWith("HETATM") || line.startsWith("ATOM")) {
       const serial = map.get(Number.parseInt(line.slice(6, 11), 10));
+      // 🔴 AND THE CHAIN LETTER IS WHAT CARRIES THE SCORE COLOUR. py2Dmol
+      // resolves a per-atom colour through an `{type:"advanced", value:{chain}}`
+      // map on the loaded object, so one letter per ligand is what lets the
+      // COLOUR BY ramp reach the 3D scene - see `chainColours` in web/screen.js.
+      // The B-FACTOR COLUMN IS LEFT ALONE for the same reason: the viewer reads
+      // it into `plddts`, and overwriting a real per-atom confidence with a
+      // whole-ligand score would be a lie told in the viewer's own units.
       out.push(line.slice(0, 6)
         + String(serial).padStart(5)
         + line.slice(11, 21)
