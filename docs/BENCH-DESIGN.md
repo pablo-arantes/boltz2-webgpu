@@ -237,8 +237,11 @@ Things considered and left undone, so they are not rediscovered:
   position is identity on a plate, and the table is what sorts - but a
   "sort the plate" control is a reasonable ask.
 - **The scatter's own type is 9-10px in a 440x240 viewBox** and scales with its
-  column, so it is small in a 6/13 column. Changing it means changing
-  `web/screen-view.js`, which both pages share.
+  box, so how big it is drawn is how big its labels are. It is capped at 640px
+  for that reason: the full 1180 measure would blow a 10px axis label up to
+  27px. If it ever needs to be wider than 640, the type sizes in
+  `web/screen-view.js` have to come down with it, and that file is shared with
+  `screen.html`.
 
 **And the pills took three attempts, two of which looked identical.** The
 viewer's six camera controls stayed in py2Dmol's grey through a rule on
@@ -257,3 +260,30 @@ have looked permanently off.
 🔴 **A screenshot cannot tell "the rule is wrong" from "the rule did not
 match".** When a style change appears to do nothing, read the computed value
 before changing the rule again.
+
+## A second critique round: the plot was 200px wide
+
+A reader's own screenshot, not mine, settled this one - and my screenshot had
+the same defect in it while I read the page as finished.
+
+The scatter and the ranked table were two columns of
+`grid-template-columns: 6fr 7fr`. On a real screen the plot came out about
+**200px of 1280**, with axis labels nobody could read and a two-line heading
+over a twenty-character column of prose, while the table beside it was
+comfortable.
+
+🔴 **`1fr` IS `minmax(auto, 1fr)`, SO A TRACK NEVER SHRINKS BELOW ITS CONTENT'S
+MIN-CONTENT WIDTH.** The table's cells are `white-space: nowrap`; a screen of
+approved drugs gives it `atazanavir_#_HIV-1_PR_inhibitor` in one cell and a
+51-atom SMILES in the next, so its minimum was most of the row and the fraction
+I had written never applied. **The ratio was never the problem - the floor
+was**, and no ratio would have fixed it. My own 27-ligand screenshot had short
+`ligand_0007` ids, which kept the table's minimum small enough that the plot
+looked merely cramped rather than broken: a layout tested only with synthetic
+names is a layout tested at its easiest width.
+
+They are stacked now. The plot takes 640px of the full measure - a cap rather
+than a fraction, for the type-scaling reason above - with the note that explains
+it beside it, and the table gets the whole measure, which is what eight numeric
+columns and a SMILES want. `.plot-row` uses `minmax(0, 640px) minmax(0, 1fr)`,
+and the explicit zero minimums are the whole point of writing it that way.

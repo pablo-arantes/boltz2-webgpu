@@ -322,10 +322,27 @@ input[type="file"] { border: 0; padding: 0; font-size: 0.75rem; }
 
 /* ---------- results --------------------------------------------------- */
 
-/* The scatter draws in a fixed 440x240 space and scales with its column, so a
-   narrow column shrinks its axis type too; 6/7 keeps it near its native size
-   while leaving the table room for eight numeric columns. */
-.results { display: grid; grid-template-columns: 6fr 7fr; gap: 1.75rem; }
+/* 🔴 `1fr` HAS AN `auto` MINIMUM, AND THAT IS WHAT STARVED THE PLOT. The scatter
+   and the table were `grid-template-columns: 6fr 7fr`, which is
+   `minmax(auto, 6fr) minmax(auto, 7fr)`: a track cannot shrink below its
+   content's min-content width, the table's cells are `white-space: nowrap`, and
+   a screen of real drugs - `atazanavir`, a 51-atom SMILES - gave it a minimum
+   of most of the row. Measured on a reader's own window: the plot came out
+   about 200px wide with axis labels nobody could read, while the table beside
+   it was comfortable. The ratio was never the problem; the floor was.
+
+   So they are stacked. The plot takes 640px of the full measure - a cap, not a
+   fraction, because it draws in a fixed 440x240 space and scales with its box,
+   so 1180 would blow its 10px axis type up to 27px - and the note that explains
+   it sits in the space beside it. The table gets the whole measure, which is
+   what a table of eight numeric columns and a SMILES wants. */
+.plot-row {
+  display: grid;
+  grid-template-columns: minmax(0, 640px) minmax(0, 1fr);
+  gap: 1.75rem;
+  align-items: start;
+}
+.plot-row .panel-note { margin-top: 0; max-width: 46ch; }
 .panel-head { margin-bottom: 0.625rem; }
 .panel-note {
   margin-top: 0.375rem;
@@ -502,7 +519,7 @@ footer p + p { margin-top: 0.625rem; }
   .masthead { padding: 1.75rem 1rem 1.25rem; align-items: flex-start; }
   h1 { font-size: 1.5rem; }
   .plate-inner, main, footer { padding-left: 1rem; padding-right: 1rem; }
-  .setup, .results { grid-template-columns: 1fr; gap: 1.25rem; }
+  .setup, .plot-row { grid-template-columns: 1fr; gap: 1.25rem; }
   #queue { grid-template-columns: repeat(auto-fill, minmax(4.75rem, 1fr)); }
   .readout { flex-direction: column; gap: 0.35rem; }
   #viewer-container .py2dmol-slot > .py2dmol-slot-body,

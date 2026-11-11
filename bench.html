@@ -566,19 +566,32 @@ turns on: a virtual screen IS a plate, so the plate is the page.
         run is superposed on the first run's alpha carbons before it is drawn.</p>
     </section>
 
-    <div class="band results">
-      <section>
-        <div class="panel-head">
-          <h2>Probability against strength</h2>
-          <p class="panel-note">Point size and opacity are the interface ipTM:
-            a small faint point is a pose the model is unsure of, and an
-            affinity read off an uncertain pose is a guess.</p>
-        </div>
+    <!-- 🔴 THE PLOT AND THE TABLE ARE STACKED, NOT SIDE BY SIDE, and the
+         measurement is why. As two grid columns the plot was squeezed to about
+         200px of 1280 with axis labels nobody could read, because `6fr 7fr` is
+         really `minmax(auto, 6fr) minmax(auto, 7fr)` and a track never shrinks
+         below its content's min-content width: the table's cells are
+         `white-space: nowrap`, so a real screen - `atazanavir`,
+         `CC(C)(C)[C@@H](C(=O)N[C...` - gave it an enormous minimum and it took
+         the row. Full width, the plot gets its own 640px (capped so its
+         fixed 440x240 type stays near native scale) with the note beside it,
+         and the table gets the whole measure with no horizontal scroll. -->
+    <section class="band">
+      <div class="panel-head">
+        <h2>Probability against strength</h2>
+      </div>
+      <div class="plot-row">
         <svg id="scatter" viewBox="0 0 440 240" role="img"
           aria-label="binding probability against pIC50"></svg>
-      </section>
+        <p class="panel-note">Point size and opacity are the interface ipTM:
+          a small faint point is a pose the model is unsure of, and an
+          affinity read off an uncertain pose is a guess. The probability axis
+          is the full 0 to 1 rather than the run's own range, so a spread of
+          0.31 to 0.39 looks like the small difference it is.</p>
+      </div>
+    </section>
 
-      <section>
+    <section class="band">
         <div class="panel-head">
           <h2>Ranked molecules</h2>
           <!-- 🔴 BOTH OUTPUTS, LABELLED, NEVER MERGED. The two heads are
@@ -603,8 +616,7 @@ turns on: a virtual screen IS a plate, so the plate is the page.
             <tbody></tbody>
           </table>
         </div>
-      </section>
-    </div>
+    </section>
 
     <section class="band">
       <h2>What to distrust about these numbers</h2>
