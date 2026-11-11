@@ -126,15 +126,9 @@ python3 tools/serve.py        # any static server will do; the page is static
   your own device's limit, refuses above it before spending anything, and warns
   past the largest length measured here (297 residues).
 
-  🔴 **Crop to the domain that holds the site, and it costs you nothing in the
-  score.** Boltz-2's affinity module reads at most 256 tokens, at most 200 of
-  them protein, within 10 Å of the ligand — upstream's own `AffinityCropper`
-  defaults, which this port follows. A longer target only changes the structure
-  the score is read off. Keep the whole domain rather than a shell, since the
-  crop still has to fold on its own, and keep both domains when the site sits
-  between them. Measured on an M3 Pro at 1 recycle / 12 steps, one ligand:
-  **7.4 s at 99 residues, 20.9 s at 198, 32.2 s at 297** — so a 300-residue
-  domain screens 100 molecules in about an hour.
+  If your target is longer than that, crop it — see
+  [Tips for a screen](#tips-for-a-screen), which is also where the measured
+  cost per residue is.
 - A **one-off weights download**, cached in CacheStorage afterwards: 365 MiB
   for the structure bundle, plus 6.5 MiB for the affinity module, fetched from
   a pinned Hugging Face revision. Nothing is installed and no weight lives in
@@ -158,6 +152,79 @@ CC(=O)Oc1ccccc1C(=O)O         aspirin
 Blank lines and `#` comments are skipped. Paste the list into the box or drop
 the file on the page. A ligand that will not parse is reported on its own row
 rather than stopping the screen.
+
+## Tips for a screen
+
+### Crop the target to the domain that holds the site
+
+🔴 **This costs you nothing in the score.** Boltz-2's affinity module reads
+**at most 256 tokens, at most 200 of them protein, within 10 Å of the ligand** —
+upstream's own `AffinityCropper` defaults, which this port follows exactly
+(`shared/af3/affinity/crop.js`). Your full-length target never reaches the
+affinity head. It only changes the structure the score is read off, and the
+cost of folding it.
+
+So cropping is the method, not a workaround. How to crop:
+
+- **Keep the whole domain, not a shell around the pocket.** The crop is folded
+  from scratch with no template, so it has to be something that folds on its
+  own.
+- **Keep both domains when the site sits between them.** HIV-1 protease is the
+  clean example: the site is on the dimer axis, so a single monomer is the wrong
+  crop. Kinase hinge sites and most protease clefts are the same shape of
+  problem.
+- **Check that the crop folded** before trusting any ranking from it: the
+  per-ligand **ipTM** column, and the **target CA rms** in the line under the 3D
+  view. A crop that does not fold consistently shows up as a large rms across
+  ligands, and an affinity read off a bad pose is a guess.
+
+What a length costs — one ligand, 1 recycle / 12 steps, M3 Pro:
+
+| target | seconds a ligand | 100 ligands |
+|---|---|---|
+| 99 aa | 7.4 s | ~12 min |
+| 198 aa | 20.9 s | ~35 min |
+| 297 aa | 32.2 s | ~54 min |
+
+Across that range the cost grows about as `residues^1.35`, because the
+per-ligand fixed costs still dominate — **not** as the cube, which is the
+asymptotic term. 297 residues is the largest length timed here, so the page
+warns rather than predicts above it, and refuses above your GPU's own ceiling.
+Don't read a 2,000-residue estimate off that table in either direction; the
+memory arithmetic in [Running it](#running-it) is what rules that size out.
+
+### Rank cheap, then measure the hits properly
+
+The defaults (3 recycles / 100 steps) are already below Boltz-2's own affinity
+settings of **5 recycles / 200 steps / 5 samples** — a thousand denoiser calls a
+molecule — and the page says so under the controls. That is the right trade for
+a first pass: screen the library low to get an **order**, then re-run the top
+handful at upstream's settings before believing any individual number. The
+status line repeats the settings used with every run so a screenshot cannot
+lose them.
+
+### Read the ranking, and read the ipTM beside it
+
+- **P(binder)** answers "is this a binder at all". **pIC50** is an IC50-*like*
+  strength for ordering congeneric molecules. They come from two heads trained
+  on different data; there is no third number and the page will not invent one.
+  [The two numbers](#the-two-numbers-and-why-there-is-no-third) has the detail.
+- A **low ipTM** means the interface is a guess, and so is the affinity read off
+  it. The scatter draws it as point size and opacity so an unreliable prediction
+  looks unreliable.
+- The **plate** at the top is one well per molecule, coloured on the same scale
+  as the points, the table swatches and the atoms. Click a well to leave that
+  molecule alone in the pocket.
+- **What to distrust** at the bottom of the page is generated from your own run
+  — the ensemble spread, how many poses are below ipTM 0.5 — not boilerplate.
+
+### One connected molecule per line
+
+A salt or co-crystal has no single binder to score, and the page refuses it by
+name rather than guessing. `[Li+].[Li+].C(=O)([O-])[O-]` comes back as "this
+ligand is 3 disconnected fragments (a "." in the SMILES). Affinity is predicted
+for one molecule; split it, or remove the counter-ion." Strip counter-ions
+before screening.
 
 ## What leaves your machine
 

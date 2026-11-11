@@ -115,6 +115,26 @@ test("🔴 the numbers here are the ones shared/af3/affinity/crop.js holds", () 
                "the 10 Å in the advice is the cropper's neighbourhood");
 });
 
+test("🔴 the README's crop advice carries the SAME numbers as the cropper", () => {
+  // 🔴 THE README IS THE THIRD COPY OF THIS BUDGET, after the page's advice and
+  // the cropper itself - and prose is always the copy that goes stale. A README
+  // telling a reader to crop to a size the model does not use would be worse
+  // than saying nothing, because they would act on it.
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const tips = readme.slice(readme.indexOf("## Tips for a screen"));
+  assert.ok(tips.length > 500, "the README has no screening tips section");
+  assert.match(tips, new RegExp(`${AFFINITY_PROTEIN_TOKENS} of them protein`),
+    "the tips do not give the affinity head's protein budget");
+  assert.match(tips, /10 Å/, "the tips do not give the cropper's neighbourhood");
+  assert.match(tips, /256 tokens/, "the tips do not give the token budget");
+  // the measured table, which is the other thing a reader will act on
+  for (const point of ["99 aa", "198 aa", "297 aa", "7.4 s", "20.9 s", "32.2 s"]) {
+    assert.ok(tips.includes(point), `the tips lost the measured point ${point}`);
+  }
+  assert.match(tips, new RegExp(`${MEASURED_TO} residues is the largest`),
+    "the tips must say 297 is the largest length timed, not predict beyond it");
+});
+
 test("🔴 every level gives the sequence box something to print", () => {
   for (const residues of [0, 1, 99, 250, 297, 298, 1500, 5000]) {
     const advice = targetSizeAdvice(residues);
