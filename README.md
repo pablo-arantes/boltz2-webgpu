@@ -127,6 +127,45 @@ tens of seconds each. It does **not** let the trunk be reused: the ligand's
 tokens enter the pair and MSA representations, so the trunk runs per ligand, in
 both passes. No trunk embedding is cached and none should be.
 
+## Benchmark: 9 approved inhibitors hidden among 100 drugs
+
+The first check here against **experiment** rather than against upstream
+Boltz-2. Target: HIV-1 protease, 99 residues, HXB2 wild type (UniProt P04585,
+chain "Protease"). Ligands:
+[`tools/fixtures/hiv1-protease-100.smi`](tools/fixtures/hiv1-protease-100.smi)
+— 100 approved drugs, of which **9 are the approved HIV-1 protease
+inhibitors**. Single sequence, no MSA, seed 0, 3 recycles / 100 steps for the
+pose and 5 / 200 / 1 for the affinity, 22.8 s a ligand, 39 min for the set.
+Reproduce with `python3 -I tools/benchmark_hiv1.py --screen=<run output>`.
+
+| ranking by | ROC AUC | 95% CI | EF at 1% | EF at 10% | median rank of an active |
+|---|---|---|---|---|---|
+| `P(binder)` | 0.762 | 0.540–0.935 | **11.1×** | 4.4× | 11 of 100 |
+| `pIC50` | 0.873 | 0.733–0.967 | 0× | 4.4× | 11 of 100 |
+| 🔴 **heavy-atom count** | **0.958** | 0.916–0.990 | 0× | 6.7× | 8 of 100 |
+
+🔴 **COUNTING ATOMS RANKS THESE LIGANDS BETTER THAN EITHER MODEL HEAD, AND THAT
+IS THE RESULT.** The nine actives are peptidomimetics of 40–55 heavy atoms
+against a decoy median of 24, so molecular size is itself a ranking — and on
+the whole list it is a better one, with an interval that clears both heads. So
+this benchmark does **not** show that the model recognises protease binders; it
+is consistent with it ordering ligands largely by size. `P(binder)`'s own
+interval reaches down to 0.540, which is next to chance.
+
+**Where the model does beat size: the top of the list, which is what a screen
+is read from.** `P(binder)`'s first three are saquinavir, tipranavir and
+atazanavir — all actives, EF at 1% of 11.1× — where size puts digoxin and
+azithromycin first and scores 0× there. Whole-list AUC and early enrichment
+answer different questions, and only the second is what you act on.
+
+**What would make this a real benchmark**, none of which is done here:
+property-matched decoys (matched for weight, logP and charge, DUD-E style) so
+size cannot carry the ranking; more than nine actives, since the intervals
+above are wide because of that nine; and more than one target. Until then this
+is a sanity check that the pipeline produces usable orderings, not evidence of
+predictive power. [docs/MEASURED.md](docs/MEASURED.md) carries the per-ligand
+ranks.
+
 ## Status, and what the numbers are worth
 
 The port is checked **against upstream PyTorch Boltz-2 itself**, not against

@@ -333,3 +333,111 @@ the scene in `MODEL`/`ENDMDL` - the parser pushes a model at the end regardless
 What it asserted before was the scene NOTE's text, which the page writes from
 its own bookkeeping whether or not an atom reached the viewer - so a blank box
 reported "3 of 3 ligands superposed onto run #1".
+
+
+## HIV-1 protease: 9 approved inhibitors among 100 drugs (2026-11-11)
+
+The first measurement in this project against EXPERIMENT rather than against
+upstream Boltz-2. Everything else here asks whether the port computes what
+Boltz-2 computes; this asks whether the ranking puts known binders on top, which
+a numerically perfect port can still fail - because then the answer is about
+Boltz-2, not about this code.
+
+Target: HIV-1 protease, 99 residues, HXB2 wild type, taken from UniProt P04585
+chain "Protease" (489-587) rather than from memory and cross-checked against the
+3OXC crystal construct: the only differences are the V3I/Q7K/L33I/L63I
+polymorphisms and C67A/C95A, which is the standard cysteine-free construct.
+
+Ligands: `tools/fixtures/hiv1-protease-100.smi`. Canonical isomeric SMILES from
+PubChem, every one re-parsed by `shared/chem/smiles.js` so each is a molecule
+the page actually accepts. 9 approved protease inhibitors, 91 approved drugs
+with unrelated targets - including 17 other antivirals, so the decoys are not
+separable as "not an antiviral".
+
+```
+screened 100 of 100 ligands in 39.0 min (22.8 s a ligand)
+actives present: 9 of 9
+
+P(binder)  - affinity_probability_binary, higher is better
+  ROC AUC                 0.762   95% CI 0.540-0.935   (0.5 = indistinguishable)
+  EF at    1% (top   1)    11.11x   1 of 9 actives
+  EF at    5% (top   5)     6.67x   3 of 9 actives
+  EF at   10% (top  10)     4.44x   4 of 9 actives
+  EF at   20% (top  20)     3.33x   6 of 9 actives
+  ranks of the actives    [1, 2, 3, 10, 11, 16, 49, 63, 85]
+  median active rank      11 of 100
+  top 5: saquinavir*, tipranavir*, atazanavir*, favipiravir, levothyroxine
+
+pIC50      - affinity_pred_value, LOWER log10 IC50 is better
+  ROC AUC                 0.873   95% CI 0.733-0.967   (0.5 = indistinguishable)
+  EF at    1% (top   1)     0.00x   0 of 9 actives
+  EF at    5% (top   5)     2.22x   1 of 9 actives
+  EF at   10% (top  10)     4.44x   4 of 9 actives
+  EF at   20% (top  20)     4.44x   8 of 9 actives
+  ranks of the actives    [5, 6, 7, 10, 11, 12, 16, 18, 64]
+  median active rank      11 of 100
+  top 5: digoxin, levothyroxine, itraconazole, azithromycin, lopinavir*
+
+heavy atom count - THE BASELINE, not a prediction
+  ROC AUC                 0.958   95% CI 0.916-0.990   (0.5 = indistinguishable)
+  EF at    1% (top   1)     0.00x   0 of 9 actives
+  EF at    5% (top   5)     6.67x   3 of 9 actives
+  EF at   10% (top  10)     6.67x   6 of 9 actives
+  EF at   20% (top  20)     5.00x   9 of 9 actives
+  ranks of the actives    [3, 4, 5, 7, 8, 9, 12, 13, 17]
+  median active rank      8 of 100
+  top 5: digoxin, azithromycin, atazanavir*, ritonavir*, saquinavir*
+
+written spec/HIV1-BENCHMARK.json
+```
+
+### 🔴 THE BASELINE BEATS THE MODEL, AND THAT IS THE FINDING
+
+Heavy-atom count alone ranks at **0.958 (0.916-0.990)** against `P(binder)`'s
+0.762 (0.540-0.935) and `pIC50`'s 0.873 (0.733-0.967). The actives are
+peptidomimetics of 40-55 heavy atoms and the decoy median is 24, so size IS a
+ranking here - and a better one over the whole list, with an interval clear of
+both heads. `P(binder)`'s interval reaches 0.540, next to chance.
+
+So this does not demonstrate recognition of protease binders. It is consistent
+with the heads ordering ligands largely by size. The control was written into
+the benchmark from the start for exactly this reason and the ligand file's
+header warned of it before the screen ran; it would have been easy, and wrong,
+to report 0.873 on its own as a success.
+
+### Where the model does beat size
+
+The TOP of the list. `P(binder)` ranks saquinavir, tipranavir and atazanavir
+first, second and third - EF at 1% of 11.1x - where size puts digoxin and
+azithromycin first and scores 0x. Whole-list AUC and early enrichment are
+different questions and only the second is the one a screener acts on. `pIC50`
+shows the opposite shape: better AUC, no early enrichment, and a top five of
+digoxin, levothyroxine, itraconazole, azithromycin and lopinavir - four large
+non-binders, which is what tracking size looks like.
+
+### What this is not
+
+Nine actives and one target. The intervals are wide because of that nine.
+The decoys are NOT property-matched, which is the whole reason size works -
+DUD-E-style matching on weight, logP and charge is what would make the AUC mean
+something. Settings were 3 recycles / 100 steps for the pose and 5 / 200 / 1
+for the affinity, below upstream's 5 / 200 / 5, and single-sequence with no
+alignment. A real evaluation needs matched decoys, more actives, several
+targets, and ideally a held-out set the model's authors did not train on.
+
+### Two things the run itself found
+
+🔴 **`gpu-chrome.mjs` CAPS A RUN AT 600 s** (`LOCALFOLD_GPU_TIMEOUT_MS`), so the
+first attempt at 100 ligands was killed at ten minutes and wrote nothing. A
+3-ligand timing run finished in 89 s, comfortably inside the cap, so the limit
+was invisible at the scale the job was sized on.
+
+🔴 **AND THE RUNNER THROWS ON ANY FAILURE, DISCARDING THE WHOLE SCREEN.** One
+ligand - lithium carbonate, `[Li+].[Li+].C(=O)([O-])[O-]` - was refused
+correctly ("3 disconnected fragments... affinity is predicted for one
+molecule"), and that threw `1 ligand(s) failed` AFTER 39 minutes of successful
+work, returning no JSON at all. The per-ligand lines had been printed as they
+finished, so `tools/parse_screen_log.py` recovers them. Refusing to report a
+partial screen as complete is right; also discarding the part that succeeded is
+not. The salt was my curation error and the file now carries a note saying why
+every line must be one connected molecule.

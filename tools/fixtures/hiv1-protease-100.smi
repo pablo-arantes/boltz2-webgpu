@@ -1,0 +1,124 @@
+# 100 approved drugs for a Boltz2 virtual screen against HIV-1 protease.
+#
+# SMILES <tab> name. Lines starting with # are ignored by the page.
+#
+# Canonical isomeric SMILES from PubChem (fetched by name), every one then
+# parsed by this page own shared/chem/smiles.js - so each is a molecule the
+# screen will actually accept, not merely valid SMILES.
+#
+# The first 9 are the approved HIV-1 PROTEASE INHIBITORS: they are what this
+# target is clinically inhibited by, so a screen that works should rank them
+# above the rest. The other 91 are approved drugs with unrelated targets.
+#
+# 🔴 THIS IS A SANITY CHECK, NOT A BENCHMARK. The decoys are not matched to
+# the actives for molecular weight, logP or charge, so a ranking can separate
+# them on size alone and look better than it is. Nine actives in a hundred is
+# also too few for a confident enrichment number.
+# 🔴 EVERY LINE IS ONE CONNECTED MOLECULE, WHICH IS NOT A STYLE RULE. The
+# first version of this file had lithium carbonate -
+# `[Li+].[Li+].C(=O)([O-])[O-]` - and the page refused it correctly:
+# "this ligand is 3 disconnected fragments... Affinity is predicted for one
+# molecule; split it, or remove the counter-ion." A salt or a co-crystal has
+# no single binder to score. Replaced with chloroquine.
+#
+#
+CC(C)CN(C[C@H]([C@H](CC1=CC=CC=C1)NC(=O)O[C@H]2CCOC2)O)S(=O)(=O)C3=CC=C(C=C3)N	amprenavir  # HIV-1 PR inhibitor
+CC(C)(C)[C@@H](C(=O)N[C@@H](CC1=CC=CC=C1)[C@H](CN(CC2=CC=C(C=C2)C3=CC=CC=N3)NC(=O)[C@H](C(C)(C)C)NC(=O)OC)O)NC(=O)OC	atazanavir  # HIV-1 PR inhibitor
+CC(C)CN(C[C@H]([C@H](CC1=CC=CC=C1)NC(=O)O[C@H]2CO[C@@H]3[C@H]2CCO3)O)S(=O)(=O)C4=CC=C(C=C4)N	darunavir  # HIV-1 PR inhibitor
+CC(C)(C)NC(=O)[C@@H]1CN(CCN1C[C@H](C[C@@H](CC2=CC=CC=C2)C(=O)N[C@@H]3[C@@H](CC4=CC=CC=C34)O)O)CC5=CN=CC=C5	indinavir  # HIV-1 PR inhibitor
+CC1=C(C(=CC=C1)C)OCC(=O)N[C@@H](CC2=CC=CC=C2)[C@H](C[C@H](CC3=CC=CC=C3)NC(=O)[C@H](C(C)C)N4CCCNC4=O)O	lopinavir  # HIV-1 PR inhibitor
+CC1=C(C=CC=C1O)C(=O)N[C@@H](CSC2=CC=CC=C2)[C@@H](CN3C[C@H]4CCCC[C@H]4C[C@H]3C(=O)NC(C)(C)C)O	nelfinavir  # HIV-1 PR inhibitor
+CC(C)C1=NC(=CS1)CN(C)C(=O)N[C@@H](C(C)C)C(=O)N[C@@H](CC2=CC=CC=C2)C[C@@H]([C@H](CC3=CC=CC=C3)NC(=O)OCC4=CN=CS4)O	ritonavir  # HIV-1 PR inhibitor
+CC(C)(C)NC(=O)[C@@H]1C[C@@H]2CCCC[C@@H]2CN1C[C@H]([C@H](CC3=CC=CC=C3)NC(=O)[C@H](CC(=O)N)NC(=O)C4=NC5=CC=CC=C5C=C4)O	saquinavir  # HIV-1 PR inhibitor
+CCC[C@]1(CC(=C(C(=O)O1)[C@H](CC)C2=CC(=CC=C2)NS(=O)(=O)C3=NC=C(C=C3)C(F)(F)F)O)CCC4=CC=CC=C4	tipranavir  # HIV-1 PR inhibitor
+C1CC1NC2=C3C(=NC(=N2)N)N(C=N3)[C@@H]4C[C@@H](C=C4)CO	abacavir
+C1=NC2=C(N1COCCO)N=C(NC2=O)N	acyclovir
+C1=NNC2=C1C(=O)NC=N2	allopurinol
+CC1=NN=C2N1C3=C(C=C(C=C3)Cl)C(=NC2)C4=CC=CC=C4	alprazolam
+CN(C)CCC=C1C2=CC=CC=C2CCC3=CC=CC=C31	amitriptyline
+CCOC(=O)C1=C(NC(=C(C1C2=CC=CC=C2Cl)C(=O)OC)C)COCCN	amlodipine
+CC1([C@@H](N2[C@H](S1)[C@@H](C2=O)NC(=O)[C@@H](C3=CC=C(C=C3)O)N)C(=O)O)C	amoxicillin
+CC1([C@@H](N2[C@H](S1)[C@@H](C2=O)NC(=O)[C@@H](C3=CC=CC=C3)N)C(=O)O)C	ampicillin
+CC(=O)OC1=CC=CC=C1C(=O)O	aspirin
+CC(C)NCC(COC1=CC=C(C=C1)CC(=O)N)O	atenolol
+CC(C)C1=C(C(=C(N1CC[C@H](C[C@H](CC(=O)O)O)O)C2=CC=C(C=C2)F)C3=CC=CC=C3)C(=O)NC4=CC=CC=C4	atorvastatin
+CC[C@@H]1[C@@]([C@@H]([C@H](N(C[C@@H](C[C@@]([C@@H]([C@H]([C@@H]([C@H](C(=O)O1)C)O[C@H]2C[C@@]([C@H]([C@@H](O2)C)O)(C)OC)C)O[C@H]3[C@@H]([C@H](C[C@H](O3)C)N(C)C)O)(C)O)C)C)C)O)(C)O	azithromycin
+CN1C=NC2=C1C(=O)N(C(=O)N2C)C	caffeine
+C1=CC=C2C(=C1)C=CC3=CC=CC=C3N2C(=O)N	carbamazepine
+COC1=CC=CC=C1OCCNCC(COC2=CC=CC3=C2C4=CC=CC=C4N3)O	carvedilol
+CC1=CC=C(C=C1)C2=CC(=NN2C3=CC=C(C=C3)S(=O)(=O)N)C(F)(F)F	celecoxib
+C1CN(CCN1CCOCC(=O)O)C(C2=CC=CC=C2)C3=CC=C(C=C3)Cl	cetirizine
+C1CC1N2C=C(C(=O)C3=CC(=C(C=C32)N4CCNCC4)F)C(=O)O	ciprofloxacin
+CN(C)CCCC1(C2=C(CO1)C=C(C=C2)C#N)C3=CC=C(C=C3)F	citalopram
+COC(=O)[C@H](C1=CC=CC=C1Cl)N2CCC3=C(C2)C=CS3	clopidogrel
+CN1CC[C@]23[C@@H]4[C@H]1CC5=C2C(=C(C=C5)OC)O[C@H]3[C@H](C=C4)O	codeine
+CC(=O)N[C@H]1CCC2=CC(=C(C(=C2C3=CC=C(C(=O)C=C13)OC)OC)OC)OC	colchicine
+C[C@@H]1C[C@H]2[C@@H]3CCC4=CC(=O)C=C[C@@]4([C@]3([C@H](C[C@@]2([C@]1(C(=O)CO)O)C)O)F)C	dexamethasone
+CN1C(=O)CN=C(C2=C1C=CC(=C2)Cl)C3=CC=CC=C3	diazepam
+C1=CC=C(C(=C1)CC(=O)O)NC2=C(C=CC=C2Cl)Cl	diclofenac
+C[C@@H]1[C@H]([C@H](C[C@@H](O1)O[C@@H]2[C@H](O[C@H](C[C@@H]2O)O[C@@H]3[C@H](O[C@H](C[C@@H]3O)O[C@H]4CC[C@]5([C@@H](C4)CC[C@@H]6[C@@H]5C[C@H]([C@]7([C@@]6(CC[C@@H]7C8=CC(=O)OC8)O)C)O)C)C)C)O)O	digoxin
+C[C@@H]1CCO[C@@H]2N1C(=O)C3=C(C(=O)C(=CN3C2)C(=O)NCC4=C(C=C(C=C4)F)F)O	dolutegravir
+COC1=C(C=C2C(=C1)CC(C2=O)CC3CCN(CC3)CC4=CC=CC=C4)OC	donepezil
+C[C@@H]1[C@H]2[C@@H]([C@H]3[C@@H](C(=O)C(=C([C@]3(C(=O)C2=C(C4=C1C=CC=C4O)O)O)O)C(=O)N)N(C)C)O	doxycycline
+C1CC1C#C[C@]2(C3=C(C=CC(=C3)Cl)NC(=O)O2)C(F)(F)F	efavirenz
+C1COC[C@H]1OC2=CC=C(C=C2)CC3=C(C=CC(=C3)[C@H]4[C@@H]([C@H]([C@@H]([C@H](O4)CO)O)O)O)Cl	empagliflozin
+C1[C@H](O[C@H](S1)CO)N2C=C(C(=NC2=O)N)F	emtricitabine
+CCOC(=O)[C@H](CCC1=CC=CC=C1)N[C@@H](C)C(=O)N2CCC[C@H]2C(=O)O	enalapril
+COCCOC1=C(C=C2C(=C1)C(=NC=N2)NC3=CC=CC(=C3)C#C)OCCOC	erlotinib
+C1=C(N=C(C(=O)N1)C(=O)N)F	favipiravir
+CCC(=O)N(C1CCN(CC1)CCC2=CC=CC=C2)C3=CC=CC=C3	fentanyl
+C1=CC(=C(C=C1F)F)C(CN2C=NC=N2)(CN3C=NC=N3)O	fluconazole
+CNCCC(C1=CC=CC=C1)OC2=CC=C(C=C2)C(F)(F)F	fluoxetine
+C1=COC(=C1)CNC2=CC(=C(C=C2C(=O)O)S(=O)(=O)N)Cl	furosemide
+C1CCC(CC1)(CC(=O)O)CN	gabapentin
+C1=NC2=C(N1COC(CO)CO)N=C(NC2=O)N	ganciclovir
+COC1=C(C=C2C(=C1)N=CN=C2NC3=CC(=C(C=C3)F)Cl)OCCCN4CCOCC4	gefitinib
+COC1=C(C=C(C=C1)Cl)C(=O)NCCC2=CC=C(C=C2)S(=O)(=O)NC(=O)NC3CCCCC3	glibenclamide
+C1CN(CCC1(C2=CC=C(C=C2)Cl)O)CCCC(=O)C3=CC=C(C=C3)F	haloperidol
+C1NC2=CC(=C(C=C2S(=O)(=O)N1)S(=O)(=O)N)Cl	hydrochlorothiazide
+CC(C)CC1=CC=C(C=C1)C(C)C(=O)O	ibuprofen
+CC1=C(C=C(C=C1)NC(=O)C2=CC=C(C=C2)CN3CCN(CC3)C)NC4=NC=CC(=N4)C5=CN=CC=C5	imatinib
+CC1=C(C2=C(N1C(=O)C3=CC=C(C=C3)Cl)C=CC(=C2)OC)CC(=O)O	indomethacin
+C1=CN=CC=C1C(=O)NN	isoniazid
+CCC(C)N1C(=O)N(C=N1)C2=CC=C(C=C2)N3CCN(CC3)C4=CC=C(C=C4)OC[C@H]5CO[C@](O5)(CN6C=NC=N6)C7=C(C=C(C=C7)Cl)Cl	itraconazole
+CC(=O)N1CCN(CC1)C2=CC=C(C=C2)OC[C@@H]3CO[C@@](O3)(CN4C=CN=C4)C5=C(C=C(C=C5)Cl)Cl	ketoconazole
+CC(C1=CC(=CC=C1)C(=O)C2=CC=CC=C2)C(=O)O	ketoprofen
+C1[C@H](O[C@H](S1)CO)N2C=CC(=NC2=O)N	lamivudine
+C1=CC(=C(C(=C1)Cl)Cl)C2=C(N=C(N=N2)N)N	lamotrigine
+C1=CC(=C(C=C1C[C@@H](C(=O)O)N)O)O	levodopa
+C[C@H]1COC2=C3N1C=C(C(=O)C3=CC(=C2N4CCN(CC4)C)F)C(=O)O	levofloxacin
+C1=C(C=C(C(=C1I)OC2=CC(=C(C(=C2)I)O)I)I)C[C@@H](C(=O)O)N	levothyroxine
+CC(=O)NC[C@H]1CN(C(=O)O1)C2=CC(=C(C=C2)N3CCOCC3)F	linezolid
+C1C[C@H](N(C1)C(=O)[C@H](CCCCN)N[C@@H](CCC2=CC=CC=C2)C(=O)O)C(=O)O	lisinopril
+CCN(CC)CCCC(C)NC1=C2C=CC(=CC2=NC=C1)Cl	chloroquine
+CCOC(=O)N1CCC(=C2C3=C(CCC4=C2N=CC=C4)C=C(C=C3)Cl)CC1	loratadine
+C1=CC=C(C(=C1)C2=NC(C(=O)NC3=C2C=C(C=C3)Cl)O)Cl	lorazepam
+CCCCC1=NC(=C(N1CC2=CC=C(C=C2)C3=CC=CC=C3C4=NNN=N4)CO)Cl	losartan
+CC1=NN=C(N1C2C[C@H]3CC[C@@H](C2)N3CC[C@@H](C4=CC=CC=C4)NC(=O)C5CCC(CC5)(F)F)C(C)C	maraviroc
+CC12CC3CC(C1)(CC(C3)(C2)N)C	memantine
+CN(C)C(=N)N=C(N)N	metformin
+CN(CC1=CN=C2C(=N1)C(=NC(=N2)N)N)C3=CC=C(C=C3)C(=O)N[C@@H](CCC(=O)O)C(=O)O	methotrexate
+CC(C)NCC(COC1=CC=C(C=C1)CCOC)O	metoprolol
+CC1=NC=C(N1CCO)[N+](=O)[O-]	metronidazole
+CN1CC[C@]23[C@@H]4[C@H]1CC5=C2C(=C(C=C5)O)O[C@H]3[C@H](C=C4)O	morphine
+C[C@@H](C1=CC2=C(C=C1)C=C(C=C2)OC)C(=O)O	naproxen
+CC1=C2C(=NC=C1)N(C3=C(C=CC=N3)C(=O)N2)C4CC4	nevirapine
+CN1CCC[C@H]1C2=CN=CC=C2	nicotine
+CC1=CC2=C(S1)NC3=CC=CC=C3N=C2N4CCN(CC4)C	olanzapine
+CC1=CN=C(C(=C1OC)C)CS(=O)C2=NC3=C(N2)C=C(C=C3)OC	omeprazole
+CCC(CC)O[C@@H]1C=C(C[C@@H]([C@H]1NC(=O)C)N)C(=O)OCC	oseltamivir
+CC(=O)NC1=CC=C(C=C1)O	paracetamol
+C1CNC[C@H]([C@@H]1C2=CC=C(C=C2)F)COC3=CC4=C(C=C3)OCO4	paroxetine
+C1=CC=C(C=C1)C2(C(=O)NC(=O)N2)C3=CC=CC=C3	phenytoin
+CN1C(=C(C2=CC=CC=C2S1(=O)=O)O)C(=O)NC3=CC=CC=N3	piroxicam
+C[C@]12CC(=O)[C@H]3[C@H]([C@@H]1CC[C@@]2(C(=O)CO)O)CCC4=CC(=O)C=C[C@]34C	prednisone
+CC(C)C[C@@H](CC(=O)O)CN	pregabalin
+CC(C)NCC(COC1=CC=CC2=CC=CC=C21)O	propranolol
+C1CN(CCN1CCOCCO)C2=NC3=CC=CC=C3SC4=CC=CC=C42	quetiapine
+CC1=NN=C(O1)C(=O)NC(C)(C)C2=NC(=C(C(=O)N2C)O)C(=O)NCC3=CC=C(C=C3)F	raltegravir
+CN/C(=C\[N+](=O)[O-])/NCCSCC1=CC=C(O1)CN(C)C	ranitidine
+CCC(CC)COC(=O)[C@H](C)N[P@](=O)(OC[C@@H]1[C@H]([C@H]([C@](O1)(C#N)C2=CC=C3N2N=CN=C3N)O)O)OC4=CC=CC=C4	remdesivir
+C1=NC(=NN1[C@H]2[C@@H]([C@@H]([C@H](O2)CO)O)O)C(=O)N	ribavirin
+CC1=CC(=CC(=C1NC2=NC(=NC=C2)NC3=CC=C(C=C3)C#N)C)/C=C/C#N	rilpivirine
+CC1=C(C(=O)N2CCCCC2=N1)CCN3CCC(CC3)C4=NOC5=C4C=CC(=C5)F	risperidone
+CC(C)C1=NC(=NC(=C1/C=C/[C@H](C[C@H](CC(=O)O)O)O)C2=CC=C(C=C2)F)N(C)S(=O)(=O)C	rosuvastatin
