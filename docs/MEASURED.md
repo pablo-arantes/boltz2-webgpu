@@ -522,3 +522,81 @@ affinity module is WebGPU-only and the screen page calls `getDevice()` directly.
 A reader whose browser cannot be persuaded to expose WebGPU cannot screen here,
 and the page now says which case they are in instead of implying they are on the
 wrong browser.
+
+## What a target's LENGTH costs, measured (2026-11-11)
+
+A reader tried a **2,000-residue** target and it did not run. The arithmetic
+says why, and the measurement says where the usable range is.
+
+🔴 **THE PAIR REPRESENTATION IS `N^2 x 128 x 4` BYTES AND THAT IS THE WHOLE
+WALL.** One pair tensor:
+
+| target | one pair tensor |
+| --- | --- |
+| 33 aa (the probe's default) | 0.5 MB |
+| 99 aa (HIV-1 protease) | 5 MB |
+| 297 aa | 45 MB |
+| **2,000 aa** | **1.91 GiB** |
+| 2,244 aa (a reader's actual paste) | 2.40 GiB |
+
+Two walls follow. The hard one is `maxStorageBufferBindingSize`: the ceiling is
+`sqrt(limit / (128 * 4))` residues. Measured on this M3 Pro through Chrome 157,
+the adapter reports **4 GiB - 4 for both `maxStorageBufferBindingSize` and
+`maxBufferSize`**, which puts that ceiling at **2,896 residues**; where a driver
+reports 2 GiB it is **2,047**, and a 2,000-residue target is then on the edge of
+refusal rather than comfortably inside it. The softer wall binds first in
+practice, because the trunk holds several pair-shaped tensors live at once for
+the triangle operations - so the usable ceiling is well below the binding limit
+and depends on free VRAM. CLAUDE.md's AF2 rows record the same mechanism from
+the other side: 28 kernel labels give out together at that exact residue, and
+"no one windowing moves it".
+
+### Seconds a ligand against target length
+
+One ligand (darunavir), 1 recycle / 12 steps / 1 sample, M3 Pro, the HIV-1
+protease sequence tiled to length:
+
+| target | seconds a ligand | 100 ligands |
+| --- | --- | --- |
+| 99 aa | 7.4 | ~12 min |
+| 198 aa | 20.9 | ~35 min |
+| 297 aa | 32.2 | ~54 min |
+
+🔴 **AND IT IS NOT N^3 IN THIS RANGE, WHICH IS A CORRECTION.** The triangle
+operations are cubic asymptotically, but across 99 -> 297 the measured growth is
+about **N^1.3-1.4**: the fixed costs per ligand - the sampler, the affinity pass,
+the per-ligand setup - still dominate. So a few-hundred-residue domain is
+practical, and 2,000 is ruled out by the memory arithmetic rather than by
+extrapolating this curve, which has no business reaching that far.
+
+### 🔴 THE AFFINITY MODULE NEVER SEES A LARGE TARGET ANYWAY
+
+`shared/af3/affinity/crop.js` carries upstream's own `AffinityCropper` defaults -
+`NEIGHBOURHOOD_SIZE = 10`, `MAX_TOKENS_PROTEIN = 200`, and
+`inferencev2.py`'s call `crop(tokenized, max_tokens=256, max_atoms=2048)`. The
+affinity head reads **at most 256 tokens, at most 200 of them protein**, within
+10 A of the ligand. A full-length target therefore buys nothing for the SCORE;
+it only changes the structure the score is read off. That makes cropping to the
+domain containing the site the right method rather than a workaround - with the
+caveat that the crop has to fold correctly on its own, so it wants the whole
+domain, and both domains when the site is at an interface.
+
+### What is still missing
+
+**There is no upper length limit on the page.** The only check is
+`sequence.length < 4` in `web/screen.js`. A 2,244-residue paste starts a run
+that cannot finish, and fails somewhere in the middle rather than at the point
+the reader could have been told.
+
+### Two probe bugs this measurement found
+
+🔴 **A ONE-LIGAND RUN COULD NOT PASS, AND THE MEASUREMENT ABOVE IS WHY WE KNOW.**
+Three single-ligand runs came back FAILED on a page that was working:
+`tools/screen-in-page.py`'s colour gate demanded "at least two distinct colours"
+unconditionally, and a single ligand has no range - `scoreColour`'s own header
+says `lo === hi` takes the middle of the ramp rather than NaN, so grey is the
+correct answer. The column-disagreement check needs two ligands for the same
+reason. 🔴 **AND THE FIRST FIX GUARDED THE MESSAGE INSTEAD OF THE BRANCH**, so
+the run fell into the `else` and subscripted `None` - a TypeError that killed
+the probe after it had completed the whole screen. Both arms now no-op below two
+ligands, verified at one ligand and at two.

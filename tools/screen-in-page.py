@@ -651,7 +651,14 @@ def main():
             if None in painted["ligands"].values():
                 failures.append("a ligand's atoms could not be found by its"
                                 f" (chain, residue) pair ({painted})")
-            if len(set(painted["ligands"].values())) < 2:
+            # 🔴 ONE LIGAND HAS NO RANGE, AND GREY IS THE RIGHT ANSWER. This
+            # gate read "< 2 distinct colours" unconditionally and failed every
+            # single-ligand run - which is how a length-scaling measurement
+            # (one ligand, three target sizes) came back FAILED three times on
+            # a page that was working. `scoreColour`'s own header says it:
+            # lo === hi gives 0/0, so it takes the middle of the ramp rather
+            # than NaN. A ramp cannot be checked without two points on it.
+            if len(ligands) > 1 and len(set(painted["ligands"].values())) < 2:
                 failures.append("every ligand is the same colour - the score"
                                 f" ramp is not reaching the scene ({painted})")
             ranked = sorted((row for row in scores
@@ -775,7 +782,10 @@ def main():
         # order is reversed, requires the warm end to move with it, and puts the
         # numbers back: it is the difference between "the ramp reaches the
         # scene" and "the ramp follows the control".
-        flipped = cdp.evaluate(ws, """(() => {
+        # 🔴 AND THE DISAGREEMENT CHECK NEEDS TWO LIGANDS TO DISAGREE ABOUT.
+        # It returned null on a one-ligand run and the gate read that as a
+        # failure, so a legitimate single-ligand probe could never pass.
+        flipped = None if len(ligands) < 2 else cdp.evaluate(ws, """(() => {
           const results = (globalThis.__screenResults ?? [])
             .filter((r) => typeof r.iptm === 'number');
           if (results.length < 2) return null;
@@ -792,9 +802,15 @@ def main():
           select.dispatchEvent(new Event('change', { bubbles: true }));
           return { saved, best: order[order.length - 1].id };
         })()""")
+        # 🔴 `None` MUST SKIP THE CHECK, NOT JUST THE COMPLAINT. The first
+        # attempt at this only guarded the `failures.append`, so a one-ligand
+        # run fell into the `else` and subscripted None - a TypeError that
+        # killed the probe after it had already done the whole screen. Two bugs
+        # in one block from one edit: guard the BRANCH, not the message.
         if flipped is None:
-            failures.append("no ipTM to flip - the disagreement check could"
-                            " not run")
+            if len(ligands) > 1:
+                failures.append("no ipTM to flip - the disagreement check"
+                                " could not run")
         else:
             time.sleep(0.4)
             painted = cdp.evaluate(ws, probe_colours)
