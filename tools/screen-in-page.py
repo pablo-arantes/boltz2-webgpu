@@ -44,6 +44,59 @@ PORT = fold_in_page.PORT
 DEFAULT_SEQUENCE = "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQ"
 
 
+HIDE_WEBGPU = """
+  try {
+    Object.defineProperty(navigator, 'gpu',
+      { get: () => undefined, configurable: true });
+  } catch {}
+"""
+
+# 🔴 REAL UA STRINGS, because the advice parses them. A made-up string would
+# exercise the parser's unknown-browser branch and prove nothing about the two
+# platforms the readers were on.
+FAKE_AGENTS = {
+    "linux": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like"
+             " Gecko) Chrome/143.0.0.0 Safari/537.36",
+    "windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+               " (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+}
+
+PROBE_DIAGNOSIS = """(() => {
+              const panel = document.getElementById('gpu-help');
+              const status = document.getElementById('screen-status');
+              return {
+                diagnostics: globalThis.__gpuAdvice?.diagnostics ?? null,
+                summary: status.textContent,
+                bad: status.classList.contains('bad'),
+                hidden: panel === null ? null : panel.hidden,
+                steps: [...(panel?.querySelectorAll('.gpu-steps li') ?? [])]
+                  .map((li) => li.textContent.trim().slice(0, 56)),
+                pastes: [...(panel?.querySelectorAll('.gpu-paste code') ?? [])]
+                  .map((code) => code.textContent),
+                links: (panel?.querySelectorAll('a[href^="chrome:"]') ?? [])
+                  .length,
+                runDisabled: document.getElementById('run').disabled,
+              };
+            })()"""
+
+
+def report(failures):
+    """Print the verdict and stop on a failure.
+
+    🔴 SHARED BY BOTH ARMS BECAUSE A `return` INSIDE THE `try` SKIPS THE TAIL.
+    The screen arm falls off the end of main() into the report; the --no-webgpu
+    arm has to return early, and an early return runs the `finally` and then
+    jumps past the reporting - so that arm would have exited 0 no matter what
+    the panel did. SystemExit raised here still runs the cleanup.
+    """
+    if failures:
+        print("\nFAILED")
+        for failure in failures:
+            print(" -", failure)
+        raise SystemExit(1)
+    print("\nok")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -95,6 +148,27 @@ def main():
     # page that is broken and nobody knows.
     ap.add_argument("--page", default="screen.html",
                     help="which page on the local server to drive")
+    # 🔴 THE MOST-READ TEXT ON THIS SITE FOR ANYONE IT FAILS, AND IT HAD NEVER
+    # BEEN SEEN RUNNING. Two readers on Chrome - one Linux, one Windows, both
+    # with real GPUs - were shown "This browser has no WebGPU. It ships in
+    # current Chrome, Edge, Safari and Firefox.", which names no cause, no check
+    # and no fix. Nothing here could have caught it, because this machine HAS
+    # WebGPU: the failure path is unreachable without taking it away. Removing
+    # `navigator.gpu` before any page script runs puts the page in exactly the
+    # state those readers were in, and it is the only way to drive the panel
+    # that replaced that sentence.
+    ap.add_argument("--no-webgpu", action="store_true",
+                    help="hide navigator.gpu and check the diagnosis instead"
+                         " of running a screen")
+    # 🔴 AND THE LINUX BRANCH IS THE ONE THAT ACTUALLY BIT A READER, so it gets
+    # driven rather than only unit-tested. Chrome on Linux below 144 exposes no
+    # WebGPU at all, and 144 only covers Intel Gen12+ - that is the case this
+    # whole panel was written for, and it cannot be reproduced on this machine
+    # except by telling the page it is somewhere else. The override changes the
+    # UA string only; the advice is a pure function of it.
+    ap.add_argument("--as-ua", default=None, choices=["linux", "windows"],
+                    help="report a different platform's user agent, to drive"
+                         " that platform's diagnosis")
     ap.add_argument("--url", default=None,
                     help="drive this URL instead of a local server, e.g."
                          " https://pablo-arantes.github.io/boltz2-webgpu/screen.html")
@@ -142,6 +216,14 @@ def main():
             });
           })();
         """)
+        if args.no_webgpu:
+            # before ANY page script, so the page sees the API as absent rather
+            # than as something that was there and went away
+            ws.call("Page.addScriptToEvaluateOnNewDocument",
+                    source=HIDE_WEBGPU)
+        if args.as_ua:
+            ws.call("Emulation.setUserAgentOverride",
+                    userAgent=FAKE_AGENTS[args.as_ua])
         ws.call("Emulation.setDeviceMetricsOverride", width=args.width,
                 height=args.height, deviceScaleFactor=1, mobile=False)
         target = args.url or ("http://127.0.0.1:%d/%s" % (PORT, args.page))
@@ -150,6 +232,87 @@ def main():
         ws.call("Page.navigate", url=target)
         cdp.wait_for(ws, "document.getElementById('run') !== null", timeout=60,
                      what="the page to load")
+
+        if args.no_webgpu:
+            cdp.wait_for(ws, "globalThis.__gpuAdvice !== undefined",
+                         timeout=60, what="the WebGPU diagnosis",
+                         progress="document.getElementById('screen-status')"
+                                  ".textContent")
+            shown = cdp.evaluate(ws, PROBE_DIAGNOSIS)
+            print("diagnosis:", shown["summary"])
+            print("diagnostics:", shown["diagnostics"])
+            print("pastes:", shown["pastes"])
+            for step in shown["steps"]:
+                print("  step:", step)
+            if not shown["bad"]:
+                failures.append("the status line does not read as an error")
+            # 🔴 THE OLD SENTENCE, NOT THE WORDS "no WebGPU". The first
+            # version of this gate matched the substring and failed on a
+            # correct page: the new Windows/macOS diagnosis says "Chrome then
+            # renders in software and exposes no WebGPU", which is the
+            # explanation rather than the dead end. What must not come back is
+            # the sentence that told a Chrome user WebGPU ships in Chrome.
+            if "ships in current Chrome" in (shown["summary"] or ""):
+                failures.append("the old uninformative sentence is back: %r"
+                                % shown["summary"])
+            if not shown["diagnostics"]:
+                failures.append("no diagnostics line for the reader to send")
+            # 🔴 THE PLATFORM-SPECIFIC STEP, ASSERTED PER PLATFORM. Linux needs
+            # #enable-vulkan and Windows must NOT be sent to it: an extra flag
+            # on Windows is noise in front of the step that works, and a missing
+            # one on Linux is the whole bug.
+            if args.as_ua == "linux":
+                if "Linux" not in shown["diagnostics"]:
+                    failures.append("the UA override did not reach the page")
+                for want in ("chrome://flags/#enable-unsafe-webgpu",
+                             "chrome://flags/#enable-vulkan"):
+                    if want not in shown["pastes"]:
+                        failures.append("a Linux reader is not told about %s"
+                                        % want)
+                if "144" not in shown["summary"]:
+                    failures.append("the Linux diagnosis does not say which"
+                                    " Chrome version turns WebGPU on")
+            if args.as_ua == "windows":
+                if "chrome://flags/#enable-vulkan" in shown["pastes"]:
+                    failures.append("a Windows reader is sent to the Linux"
+                                    " Vulkan flag")
+                if "chrome://settings/system" not in shown["pastes"]:
+                    failures.append("a Windows reader is not told to check"
+                                    " graphics acceleration")
+            # 🔴 THE PANEL IS OPTIONAL AND THE DIAGNOSIS IS NOT. screen.html
+            # is kept unedited, so it has no `#gpu-help` and gets the sentence
+            # and the diagnostics line only; bench.html has room and must show
+            # the steps. Asserting the panel on both would have forced an edit
+            # to the page whose whole value is that nothing edits it.
+            if shown["hidden"] is None:
+                print("(this page has no panel: sentence and diagnostics only)")
+                if len(shown["summary"]) < 60:
+                    failures.append("the status line is too short to diagnose"
+                                    " anything: %r" % shown["summary"])
+            else:
+                # 🔴 AND IT MUST NAME A CHECK THE READER CAN RUN. A summary with
+                # no step is the sentence this whole change replaced.
+                if not shown["pastes"]:
+                    failures.append("the panel offers nothing to paste (%s)"
+                                    % shown)
+                if shown["hidden"] is not False:
+                    failures.append("the panel did not un-hide (%s)" % shown)
+            # 🔴 A chrome:// ANCHOR IS A DEAD CLICK. Chrome refuses navigation
+            # to chrome:// from page content, so a link does nothing and reads
+            # as a broken page. The affordance has to be Copy.
+            if shown["links"]:
+                failures.append("%d chrome:// anchor(s) in the panel - they"
+                                " cannot be clicked" % shown["links"])
+            if not shown["runDisabled"]:
+                failures.append("Run screen is enabled on a page with no GPU")
+            if args.screenshot:
+                shot = ws.call("Page.captureScreenshot", format="png",
+                               captureBeyondViewport=True)
+                pathlib.Path(args.screenshot).write_bytes(
+                    base64.b64decode(shot["data"]))
+                print("screenshot:", args.screenshot)
+            report(failures)
+            return
 
         # 🔴 WAIT FOR THE BUTTON TO ENABLE, NOT FOR A FIXED TIME. `boot()`
         # enables Screen only once the device and BOTH bundles are up; a sleep
@@ -799,12 +962,7 @@ def main():
         if httpd is not None:
             httpd.shutdown()
 
-    if failures:
-        print("\nFAILED")
-        for failure in failures:
-            print(" -", failure)
-        raise SystemExit(1)
-    print("\nok")
+    report(failures)
 
 
 if __name__ == "__main__":

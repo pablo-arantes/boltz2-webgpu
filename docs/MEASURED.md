@@ -459,3 +459,66 @@ finished, so `tools/parse_screen_log.py` recovers them. Refusing to report a
 partial screen as complete is right; also discarding the part that succeeded is
 not. The salt was my curation error and the file now carries a note saying why
 every line must be one connected molecule.
+
+## "This browser has no WebGPU" was shown to two readers using Chrome (2026-11-11)
+
+A reader sent the published link to two friends, one on Linux and one on
+Windows, both on Google Chrome, both with real GPUs. Both saw:
+
+> This browser has no WebGPU. It ships in current Chrome, Edge, Safari and
+> Firefox.
+
+🔴 **THE SENTENCE NAMED NO CAUSE, NO CHECK AND NO FIX, AND ON LINUX IT WAS
+WRONG.** Chrome's own troubleshooting page says WebGPU "requires Chrome 113 or
+greater on ChromeOS, macOS, Windows and Chrome 121 or greater on Android" —
+**desktop Linux is not in that list.** Chrome only began enabling it on Linux by
+default in **144**, and 144 covers **Intel Gen12+ GPUs only**, with AMD and
+NVIDIA still being rolled out (`developer.chrome.com/blog/new-in-webgpu-144`).
+Below that, or on another GPU, it takes two flags:
+`chrome://flags/#enable-unsafe-webgpu` **and** `chrome://flags/#enable-vulkan`.
+So the Linux reader was told to use the browser they were already using, for a
+platform where it does not work by default.
+
+🔴 **AND THE THREE FAILURE STAGES WERE ONE STRING.** `navigator.gpu` absent is a
+version or platform question. A null adapter is the API working and refusing a
+GPU — graphics acceleration off, or a blocklisted driver. A failed
+`requestDevice` is a limit this port asked for that the hardware does not have,
+which is **our** bug. Chrome's troubleshooting page splits them the same way;
+`getDevice` collapsed all three.
+
+`web/webgpu-support.js` is now a pure function from what the page observed to
+what to say, with every version claim sourced in its header and pinned by
+`test/webgpu-support.test.js` (12 tests). `bench.html` renders the steps as
+copyable `chrome://` addresses — **not links, because Chrome refuses navigation
+to `chrome://` from page content, so an anchor is a dead click** — plus a
+one-line diagnostics string naming the stage, browser, platform and UA, which is
+what the next report needs to be actionable.
+
+### Driven, not reasoned about
+
+🔴 **THIS PATH HAD NEVER ONCE BEEN SEEN RUNNING, AND COULD NOT BE: this machine
+has WebGPU.** `tools/screen-in-page.py --no-webgpu` hides `navigator.gpu` before
+any page script runs, which is exactly the state those two readers were in, and
+`--as-ua=linux|windows` overrides the user agent so the platform branch that
+actually bit someone is driven in a real browser rather than only unit-tested.
+Measured, all four arms green (`npm run test:no-webgpu`):
+
+| arm | diagnosis | steps offered |
+| --- | --- | --- |
+| bench, as Linux Chrome 143 | names 144 and Intel Gen12+ | `#enable-unsafe-webgpu`, `#enable-vulkan`, `chrome://gpu`, `settings/system` |
+| bench, as Windows Chrome 143 | "has had WebGPU since 113 … something is switching it off" | `settings/system`, `chrome://gpu`, `#enable-unsafe-webgpu`, `#ignore-gpu-blocklist`, `#force-high-performance-gpu` |
+| bench, this machine (macOS) | same as Windows, without the two-GPU flag | 4 steps |
+| screen.html | the sentence and the diagnostics line only | none — it has no panel |
+
+The Windows arm asserts it is **not** sent to the Vulkan flag, and the Linux arm
+asserts it **is**: an extra flag on Windows is noise in front of the step that
+works, and a missing one on Linux was the whole defect.
+
+### What this does not fix
+
+**The screening page needs WebGPU and there is no fallback.** `foldBackend()`
+falls back to WebGL2 for the AlphaFold-3-lineage fold on `index.html`, but the
+affinity module is WebGPU-only and the screen page calls `getDevice()` directly.
+A reader whose browser cannot be persuaded to expose WebGPU cannot screen here,
+and the page now says which case they are in instead of implying they are on the
+wrong browser.

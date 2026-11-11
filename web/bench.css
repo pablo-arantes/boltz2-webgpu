@@ -526,3 +526,55 @@ footer p + p { margin-top: 0.625rem; }
   #viewer-container #canvasContainer { height: 380px; }
   .scroll { max-height: 20rem; }
 }
+
+/* ---------- the WebGPU diagnosis ------------------------------------- */
+
+/* 🔴 THE ONE PLACE A SECOND COLOUR IS EARNED. Everything else on this page is
+   ink, paper and the measurement ramp; this panel only ever appears when the
+   reader cannot run anything at all, and it has to read as a stop rather than
+   as a note. It is still not a card with a shadow: a left rule in the fault
+   colour, which is the same device the table uses for a failed molecule. */
+.gpu-help {
+  border-left: 3px solid var(--fault);
+  padding-left: 1.25rem;
+}
+.gpu-help h2 { color: var(--fault); }
+.gpu-summary {
+  margin-top: 0.5rem;
+  max-width: 74ch;
+  line-height: 1.6;
+}
+.gpu-steps {
+  margin: 1.25rem 0 0;
+  padding-left: 1.25rem;
+  max-width: 74ch;
+  display: grid;
+  gap: 1rem;
+}
+.gpu-steps li { line-height: 1.6; }
+/* 🔴 AN ADDRESS, A COPY BUTTON, AND NO LINK. Chrome refuses navigation to
+   `chrome://` from page content, so an anchor would do nothing when clicked -
+   the address bar is the only place these work, which is why the affordance is
+   Copy rather than a link. */
+.gpu-paste {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 0.35rem;
+}
+.gpu-paste code {
+  font: 0.8125rem/1.6 var(--mono);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  padding: 0.2rem 0.45rem;
+  overflow-wrap: anywhere;
+}
+.gpu-paste button { padding: 0.25rem 0.6rem; font-size: 0.8125rem; }
+.gpu-diag-label {
+  margin-top: 1.5rem;
+  max-width: 74ch;
+  font-size: 0.9375rem;
+  color: var(--quiet);
+}

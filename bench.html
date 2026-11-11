@@ -80,6 +80,21 @@ turns on: a virtual screen IS a plate, so the plate is the page.
     <div class="py2dmol-hidden-inputs" style="display: none;" aria-hidden="true">
       <input type="checkbox" id="loadAsFramesCheckbox">
     </div>
+    <!--
+      🔴 WHERE THE WEBGPU DIAGNOSIS GOES, AND IT IS EMPTY AND HIDDEN UNTIL IT
+      IS NEEDED. Two readers on Chrome - one Linux, one Windows, both with real
+      GPUs - were told "This browser has no WebGPU. It ships in current Chrome,
+      Edge, Safari and Firefox.", which names no cause, no check and no fix, and
+      is wrong about Linux: Chrome did not enable WebGPU there by default until
+      144, and 144 only covers Intel Gen12+. web/webgpu-support.js works out
+      which of the three failure stages happened and what to do about it; this
+      is the only place with room to print the steps.
+
+      It is FIRST in the page, above the inputs, because a reader who cannot run
+      anything should not have to scroll past a form to find out why.
+    -->
+    <section class="band gpu-help" id="gpu-help" hidden></section>
+
     <div class="band setup">
       <section class="field">
         <div class="field-head">

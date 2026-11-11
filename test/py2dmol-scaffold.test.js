@@ -82,17 +82,43 @@ test("🔴 every page gives py2Dmol the same viewer subtree", () => {
  * console line. There is no way to notice by looking at the markup, and the
  * ids are spread over 600 lines of two files.
  */
+/**
+ * 🔴 AND ONE ID IS DELIBERATELY OPTIONAL, WHICH IS NOT THE SAME AS EXEMPT.
+ * `#gpu-help` is the panel bench.html gives the WebGPU diagnosis; screen.html
+ * does not have it and is not going to, because the whole point of keeping that
+ * page is that nothing edits it. So the rule is not "every id exists
+ * everywhere" but "every id the controller reads UNGUARDED exists everywhere,
+ * and an optional one is really guarded" - which this checks, rather than
+ * taking the exemption on trust. A `$("gpu-help")` whose null check was ever
+ * dropped would make screen.html throw on the one path it is there to survive.
+ */
+const OPTIONAL_IDS = ["gpu-help"];
+
 test("🔴 every page supplies every id the controller reaches for", () => {
-  const wanted = new Set([...read("web/screen.js")
+  const controller = read("web/screen.js");
+  const wanted = new Set([...controller
     .matchAll(/\$\("([a-z0-9-]+)"\)/g)].map((match) => match[1]));
   assert.ok(wanted.size > 15, "the controller's id list did not parse");
+  for (const id of OPTIONAL_IDS) {
+    assert.ok(wanted.has(id), `${id} is listed optional and never read`);
+    const at = controller.indexOf(`$("${id}")`);
+    assert.match(controller.slice(at, at + 160), /null/,
+      `${id} is read without a null check within a few lines - it cannot be`
+      + " optional, so either guard it or add it to every page");
+  }
+  const required = [...wanted].filter((id) => !OPTIONAL_IDS.includes(id));
   for (const page of PAGES) {
     const html = read(page);
-    const missing = [...wanted]
+    const missing = required
       .filter((id) => !html.includes(`id="${id}"`)).sort();
     assert.deepEqual(missing, [],
       `${page} is missing ${missing.join(", ")}, which web/screen.js reads -`
       + " the page will throw in refresh() and render nothing");
+  }
+  // the optional one still has to exist somewhere, or it is dead code
+  for (const id of OPTIONAL_IDS) {
+    assert.ok(PAGES.some((page) => read(page).includes(`id="${id}"`)),
+      `${id} is read by the controller and is on no page at all`);
   }
 });
 

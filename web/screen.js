@@ -624,6 +624,97 @@ function renderLigandPicker() {
   picker.disabled = ligands.length === 0;
 }
 
+/**
+ * The WebGPU advice, rendered where a page has room for it.
+ *
+ * 🔴 A `chrome://` ADDRESS IS NOT A LINK AND MUST NOT LOOK LIKE ONE. Chrome
+ * refuses navigation to `chrome://` from page content, so an anchor here would
+ * do nothing when clicked and the reader would conclude the page is broken.
+ * Each address is rendered as a `<code>` with a copy button, which is the
+ * action that actually helps: the address bar is the only place it works.
+ */
+function showGpuHelp(advice) {
+  if (advice === undefined || advice === null) return;
+  // 🔴 PUBLISHED BEFORE THE PANEL CHECK, SO BOTH PAGES HAVE IT. The diagnosis
+  // is something the page worked out; a page with nowhere to print the steps
+  // should still be able to hand over the one line that identifies the case -
+  // from the console, or to this probe. Publishing it after the early return
+  // meant screen.html computed the advice and threw it away.
+  globalThis.__gpuAdvice = advice;
+  const panel = $("gpu-help");
+  if (panel === null) return;
+  panel.replaceChildren();
+  const heading = document.createElement("h2");
+  heading.textContent = "This browser did not give us a GPU";
+  panel.append(heading);
+
+  const summary = document.createElement("p");
+  summary.className = "gpu-summary";
+  summary.textContent = advice.summary;
+  panel.append(summary);
+
+  if (Array.isArray(advice.steps) && advice.steps.length > 0) {
+    const list = document.createElement("ol");
+    list.className = "gpu-steps";
+    for (const step of advice.steps) {
+      const item = document.createElement("li");
+      if (typeof step.paste === "string") {
+        const row = document.createElement("div");
+        row.className = "gpu-paste";
+        const code = document.createElement("code");
+        code.textContent = step.paste;
+        const copy = document.createElement("button");
+        copy.type = "button";
+        copy.textContent = "Copy";
+        copy.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(step.paste);
+            copy.textContent = "Copied";
+          } catch {
+            // 🔴 CLIPBOARD ACCESS CAN BE REFUSED, and a button that silently
+            // does nothing is worse than one that tells you to select the text.
+            copy.textContent = "Copy by hand";
+          }
+        });
+        row.append(code, copy);
+        item.append(row);
+      }
+      const text = document.createElement("span");
+      text.textContent = step.do;
+      item.append(text);
+      list.append(item);
+    }
+    panel.append(list);
+  }
+
+  // 🔴 AND THE DIAGNOSTICS LINE IS THE POINT OF THE WHOLE PANEL FOR US. The
+  // report that started this was a photograph of a sentence: no browser
+  // version, no platform, no failure stage. One copyable line turns the next
+  // report into something that can be acted on.
+  const label = document.createElement("p");
+  label.className = "gpu-diag-label";
+  label.textContent = "If none of that helps, copy this line into an issue"
+    + " — it is what tells us which of these cases you are in:";
+  const diag = document.createElement("div");
+  diag.className = "gpu-paste";
+  const code = document.createElement("code");
+  code.textContent = advice.diagnostics;
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.textContent = "Copy";
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(advice.diagnostics);
+      copy.textContent = "Copied";
+    } catch {
+      copy.textContent = "Copy by hand";
+    }
+  });
+  diag.append(code, copy);
+  panel.append(label, diag);
+  panel.hidden = false;
+}
+
 async function boot() {
   say("Asking for a WebGPU device…");
   let device;
@@ -631,6 +722,12 @@ async function boot() {
     device = await getDevice();
   } catch (error) {
     say(String(error?.message ?? error), true);
+    // 🔴 AND THE STEPS GO SOMEWHERE A READER CAN USE THEM. A status line can
+    // carry one sentence; "open chrome://flags/#enable-unsafe-webgpu, then
+    // chrome://flags/#enable-vulkan, then relaunch" is a procedure. The panel
+    // is OPTIONAL - screen.html does not have it and must not be changed to
+    // get it - so this renders what it can find and never depends on it.
+    showGpuHelp(error?.webgpu);
     return;
   }
   say("Fetching the Boltz-2 structure weights…");

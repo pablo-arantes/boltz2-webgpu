@@ -93,7 +93,30 @@ python3 tools/serve.py        # any static server will do; the page is static
 
 **Requirements**
 
-- A browser with **WebGPU**: current Chrome, Edge, Safari or Firefox.
+- A browser with **WebGPU**, which is not the same as a recent browser. What
+  has it switched on by default:
+
+  | Browser | Where | From version |
+  | --- | --- | --- |
+  | Chrome, Edge | Windows, macOS, ChromeOS | 113 |
+  | Chrome | Android | 121 |
+  | Chrome | Linux, Intel Gen12+ GPUs only | 144 |
+  | Firefox | Windows | 141 |
+  | Firefox | macOS, Apple silicon | 145 |
+  | Safari | macOS 26, iOS 26, iPadOS 26 | 26 |
+
+  🔴 **Linux is the one that catches people out.** Chrome did not enable WebGPU
+  there by default until 144, and 144 only covers Intel Gen12+ — AMD and NVIDIA
+  are still being rolled out. Below that, or on another GPU, it takes two flags:
+  `chrome://flags/#enable-unsafe-webgpu` and `chrome://flags/#enable-vulkan`,
+  then relaunch. `chrome://gpu` is the page that tells you where you stand.
+
+  It can also be switched off on a machine that should have it: with "Use
+  graphics acceleration when available" off in `chrome://settings/system`,
+  Chrome renders in software and offers no WebGPU at all.
+
+  If the page says it got no GPU, it now works out which of those cases you are
+  in and prints the steps, with a diagnostics line to paste into an issue.
 - A **one-off weights download**, cached in CacheStorage afterwards: 365 MiB
   for the structure bundle, plus 6.5 MiB for the affinity module, fetched from
   a pinned Hugging Face revision. Nothing is installed and no weight lives in

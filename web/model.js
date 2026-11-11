@@ -23,6 +23,7 @@ import { MODEL_BUNDLES, bundleBaseUrl, graphFamily, loadManifest }
   from "../shared/bundles/manifests/index.js";
 import { DeltaTensorStore } from "../shared/bundles/delta-tensor-store.js";
 import { requestAlphaFoldDevice } from "../webgpu/runtime/device.js";
+import { webgpuAdvice } from "./webgpu-support.js";
 import { settleGridAttendTiling } from "../webgpu/af3/trunk/grid-attend-race.js";
 import { webgl2FoldAvailable } from "../webgl/af3/model/fold-batch.js";
 import { devUseDevice } from "./dev-log.js";
@@ -167,6 +168,24 @@ export function openStore(onProgress, family = DEFAULT_FAMILY) {
 
 let devicePromise;
 
+/**
+ * One of WebGPU's three failure stages, as an Error a page can render.
+ *
+ * `.message` is the one-sentence summary, so a page with nothing but a status
+ * line is no worse off than before. `.webgpu` carries the steps and the
+ * diagnostics for a page that has somewhere to put them.
+ */
+function webgpuError(stage, detail) {
+  const advice = webgpuAdvice(stage, {
+    userAgent: globalThis.navigator?.userAgent ?? "",
+    isSecureContext: globalThis.isSecureContext !== false,
+    detail,
+  });
+  const error = new Error(advice.summary);
+  error.webgpu = advice;
+  return error;
+}
+
 /** The WebGPU device, with the optional features the fast paths look for. */
 export function getDevice() {
   if (devicePromise !== undefined) return devicePromise;
@@ -174,14 +193,31 @@ export function getDevice() {
   // "No compatible WebGPU adapter was found" until a reload, and a lost device (a crashed GPU process, a driver reset)
   // had every later fold run against a dead device. The next fold asks again.
   const request = (async () => {
-    if (navigator.gpu === undefined) throw new Error("This browser has no WebGPU. It ships in current Chrome, Edge, Safari and Firefox.");
+    // 🔴 EACH OF THE THREE STAGES GETS ITS OWN DIAGNOSIS, because they are
+    // different problems with different fixes and this page told readers on
+    // Chrome that WebGPU "ships in current Chrome". See web/webgpu-support.js:
+    // the advice is a pure function of what was observed, the error carries it
+    // on `.webgpu` for a page that wants to render the steps, and `.message`
+    // stays a single readable sentence for a page that only has a status line.
+    if (navigator.gpu === undefined) throw webgpuError("missing");
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
-    if (adapter === null) throw new Error("No compatible WebGPU adapter was found");
+    if (adapter === null) throw webgpuError("no-adapter");
     // 🔴 THE PAGE IS THE ONE CALLER THAT HAS TO SURVIVE BEING WRONG. A bench
     // that asks for too much should fail loudly and does; a page that asks for
     // too much takes the machine down with it, so this is where the ceiling is
     // set. `null` takes the guess in device-memory.js from navigator.deviceMemory.
-    const device = await requestAlphaFoldDevice(adapter, { memoryBudgetBytes: null });
+    let device;
+    try {
+      device = await requestAlphaFoldDevice(adapter, { memoryBudgetBytes: null });
+    } catch (cause) {
+      // 🔴 A REFUSED DEVICE IS OUR BUG, NOT THE VISITOR'S SETUP, and it used to
+      // surface as whatever the vendor threw. This port asks for limits and
+      // optional features; hardware that has WebGPU and cannot meet one of them
+      // is a machine we got wrong, so the message says so and asks for the
+      // diagnostics line rather than sending the reader to a flags page that
+      // cannot help.
+      throw webgpuError("device-failed", String(cause?.message ?? cause));
+    }
     // ...so the footer's timing panel can read this device's memory counters.
     // It reads them; it does not install anything on the device.
     devUseDevice(device);
@@ -205,8 +241,9 @@ let backendPromise;
  *
  * 🔴 AND A BROWSER WITH NEITHER STILL GETS THE SENTENCE IT GOT BEFORE. The WebGL2 path is a
  * FALLBACK, so this asks for WebGPU first and only looks further when that fails - and when WebGL2
- * cannot render to a float texture either, it rethrows `getDevice`'s own error ("This browser has no
- * WebGPU...") rather than inventing a second message about a backend the visitor also does not have.
+ * cannot render to a float texture either, it rethrows `getDevice`'s own error - now one of
+ * web/webgpu-support.js's three diagnoses, carrying `.webgpu` with the steps - rather than inventing
+ * a second message about a backend the visitor also does not have.
  *
  * 🔴 AND IT IS NOT A FALLBACK FOR EVERY MODEL. `webgl/` holds af2, af3, bioemu2, esmc and esmfold2,
  * but the only one wired into the PAGE is the AlphaFold 3 lineage (web/af3-model.js's
