@@ -178,17 +178,89 @@ function refresh() {
   renderQueue();
 }
 
+/** The colour a finished ligand is drawn in, in whichever mode is selected. */
+function ligandColour(result, domain) {
+  if (state.colourBy === RAINBOW) {
+    return state.sceneColours.get(result.id) ?? null;
+  }
+  return scoreColour(result[state.colourBy], domain.lo, domain.hi);
+}
+
+/**
+ * Leave one ligand in the scene, or all of them.
+ *
+ * 🔴 ONE FUNCTION FOR TWO CONTROLS. The picker and the queue both do this, and
+ * two copies would be two chances for the scene and `state.visible` to
+ * disagree - which shows up as a table checkbox that is ticked for a ligand
+ * that is not drawn.
+ *
+ * @param {string} only a ligand id, or "" for every ligand
+ */
+function showOnly(only) {
+  for (const entry of state.scene.ligands) {
+    const visible = only === "" || only === entry.id;
+    state.scene.setVisible(entry.id, visible);
+    if (visible) state.visible.add(entry.id);
+    else state.visible.delete(entry.id);
+  }
+  drawScene();
+  refresh();
+}
+
+/**
+ * The queue: one element per submitted ligand, in submission order.
+ *
+ * 🔴 IT CARRIES THE SCORE AS WELL AS THE STATUS, AND NEITHER PAGE IS FORCED TO
+ * SHOW IT. A screen IS a plate - one target, N compounds, one number per well -
+ * and bench.html draws this as that plate, each well taking the ligand's own
+ * colour from the same ramp as the scatter, the table and the atoms on screen.
+ * screen.css reads neither `--well` nor `data-id`, so screen.html is unchanged
+ * by this: the controller supplies the data and each page decides what to make
+ * of it, which is what let a second front end exist without a second
+ * controller.
+ *
+ * 🔴 THE WELLS ARE A POINTER SHORTCUT, NOT THE ONLY WAY IN. They are spans
+ * rather than buttons, and not focusable: a hundred wells in the tab order is a
+ * trap, and a roving-tabindex grid would add no capability, because `#show-ligand`
+ * is a native select listing every one of them and doing exactly the same
+ * thing. Clicking a well is the fast path to a control that is already there.
+ */
 function renderQueue() {
   const queue = $("queue");
+  const done = state.results.filter((result) => statusOf(result) === "done");
+  const domain = scoreDomain(done, state.colourBy);
   queue.replaceChildren();
   for (const job of state.jobs) {
     const found = state.results.find((result) => result.id === job.id);
-    const chip = document.createElement("span");
-    chip.textContent = job.id;
-    chip.title = job.smiles;
-    chip.className = found === undefined
+    const status = found === undefined
       ? (state.runningId === job.id ? "running" : "")
       : statusOf(found);
+    const chip = document.createElement("span");
+    chip.textContent = job.id;
+    chip.className = status;
+    chip.dataset.id = job.id;
+    if (status === "done") {
+      const colour = ligandColour(found, domain);
+      if (colour !== null) chip.style.setProperty("--well", colour);
+      const probability = found.affinity_probability_binary;
+      chip.title = `${job.id}  ${job.smiles}\n`
+        + `P(binder) ${Number.isFinite(probability)
+          ? probability.toFixed(3) : "-"}`
+        + `   pIC50 ${Number.isFinite(found.pIC50)
+          ? found.pIC50.toFixed(2) : "-"}`
+        + "\nclick to see this molecule on its own";
+    } else {
+      chip.title = `${job.id}  ${job.smiles}`
+        + (status === "failed" ? `\n${found.error ?? "failed"}` : "");
+    }
+    if (status === "done") {
+      chip.addEventListener("click", () => {
+        // a second click on the molecule already alone puts the rest back
+        const alone = state.visible.size === 1 && state.visible.has(job.id);
+        state.highlight = alone ? null : job.id;
+        showOnly(alone ? "" : job.id);
+      });
+    }
     queue.append(chip);
   }
 }
@@ -836,15 +908,7 @@ function wire() {
     // remembered "showing only X" would go stale the moment a reader ticked a
     // second row - the picker would still read one ligand while two were drawn.
     // It writes the visible set and is re-derived from it on every refresh.
-    const only = $("show-ligand").value;
-    for (const entry of state.scene.ligands) {
-      const visible = only === "" || only === entry.id;
-      state.scene.setVisible(entry.id, visible);
-      if (visible) state.visible.add(entry.id);
-      else state.visible.delete(entry.id);
-    }
-    drawScene();
-    refresh();
+    showOnly($("show-ligand").value);
   });
 }
 

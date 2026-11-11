@@ -1,5 +1,5 @@
 /**
- * The two pages' py2Dmol scaffolds, held against each other.
+ * Every page's py2Dmol scaffold, held against index.html's.
  *
  * 🔴 THE VENDOR BUNDLE INITIALISES BY `getElementById` AND FAILS SILENTLY. It
  * queries fifteen ids and builds its viewer inside `#viewer-container`; given a
@@ -10,6 +10,11 @@
  * So screen.html carries index.html's viewer subtree verbatim, and this is what
  * stops the copy rotting: a control added to one page's viewer and not the
  * other is a control the vendor queries on one page and not the other.
+ *
+ * 🔴 AND IT IS A LIST OF PAGES RATHER THAN A PAIR, because bench.html made it
+ * three. A test written as "the two pages" is a test that silently stops
+ * covering the newest copy of the subtree - which is the copy most likely to
+ * have been typed rather than spliced.
  *
  * 🔴 AND THE ONE DELIBERATE DIFFERENCE IS ASSERTED, NOT EXEMPTED. `#status` is
  * py2Dmol's own element - it writes "Ready. Upload a file or fetch an ID." into
@@ -52,16 +57,43 @@ function vendorIds() {
     .map((match) => match[1]));
 }
 
-test("🔴 both pages give py2Dmol the same viewer subtree", () => {
+/** Every page that embeds py2Dmol's viewer, index.html being the original. */
+const PAGES = ["screen.html", "bench.html"];
+
+test("🔴 every page gives py2Dmol the same viewer subtree", () => {
   const fold = viewerIds(read("index.html"));
-  const screen = viewerIds(read("screen.html"));
-  const missing = [...fold].filter((id) => !screen.has(id));
-  const extra = [...screen].filter((id) => !fold.has(id));
-  assert.deepEqual(missing, [],
-    `screen.html's viewer is missing ${missing.join(", ")} - copy the subtree`
-    + " from index.html again");
-  assert.deepEqual(extra, [],
-    `screen.html's viewer has ${extra.join(", ")} that index.html does not`);
+  for (const page of PAGES) {
+    const ids = viewerIds(read(page));
+    const missing = [...fold].filter((id) => !ids.has(id));
+    const extra = [...ids].filter((id) => !fold.has(id));
+    assert.deepEqual(missing, [],
+      `${page}'s viewer is missing ${missing.join(", ")} - copy the subtree`
+      + " from index.html again");
+    assert.deepEqual(extra, [],
+      `${page}'s viewer has ${extra.join(", ")} that index.html does not`);
+  }
+});
+
+/**
+ * 🔴 THE SECOND FRONT END SHARES THE CONTROLLER, SO IT MUST SHARE ITS DOM
+ * CONTRACT. web/screen.js reaches for its elements by id and fails at the
+ * first missing one - `$("queue")` returning null throws inside `refresh`,
+ * which runs before anything is on screen, so the page dies blank with one
+ * console line. There is no way to notice by looking at the markup, and the
+ * ids are spread over 600 lines of two files.
+ */
+test("🔴 every page supplies every id the controller reaches for", () => {
+  const wanted = new Set([...read("web/screen.js")
+    .matchAll(/\$\("([a-z0-9-]+)"\)/g)].map((match) => match[1]));
+  assert.ok(wanted.size > 15, "the controller's id list did not parse");
+  for (const page of PAGES) {
+    const html = read(page);
+    const missing = [...wanted]
+      .filter((id) => !html.includes(`id="${id}"`)).sort();
+    assert.deepEqual(missing, [],
+      `${page} is missing ${missing.join(", ")}, which web/screen.js reads -`
+      + " the page will throw in refresh() and render nothing");
+  }
 });
 
 /**
@@ -79,11 +111,45 @@ test("🔴 both pages give py2Dmol the same viewer subtree", () => {
  * time it is right about nothing.
  */
 
-test("🔴 the screen page's own status line is NOT #status", () => {
-  const html = read("screen.html");
+/**
+ * 🔴 AN ID IS NOT THE WHOLE CONTRACT. `#table` has to arrive with a `thead` and
+ * a `tbody` already in it, because `drawTable` calls
+ * `table.querySelector("thead").replaceChildren()` with no guard - and
+ * `drawScatter` needs `#scatter` to be an SVG it can append SVG nodes to.
+ * bench.html shipped `<table id="table"></table>`, passed the id check above,
+ * and died on "Loading…" with every id present and one console line: the throw
+ * happens in `refresh()`, before anything is drawn. Reading the markup cannot
+ * show it; this can.
+ */
+test("🔴 the ranked table arrives with the sections drawTable writes into", () => {
+  assert.match(read("web/screen-view.js"), /querySelector\("thead"\)/,
+    "if drawTable no longer needs a thead, this test can go");
+  for (const page of PAGES) {
+    const html = read(page);
+    const table = html.slice(html.indexOf('<table id="table"'));
+    const end = table.indexOf("</table>");
+    assert.ok(end > 0, `${page} has no <table id="table"> that closes`);
+    const inside = table.slice(0, end);
+    assert.match(inside, /<thead\b/, `${page}'s #table has no thead`);
+    assert.match(inside, /<tbody\b/, `${page}'s #table has no tbody`);
+  }
+});
+
+test("🔴 the scatter is an SVG with the coordinate space drawScatter draws in", () => {
+  for (const page of PAGES) {
+    const svg = read(page).match(/<svg[^>]*id="scatter"[^>]*>/);
+    assert.ok(svg !== null, `${page} has no <svg id="scatter">`);
+    // drawScatter lays out in a fixed 440x240 space and relies on the viewBox
+    // to scale it; without one the plot is drawn at 440px whatever the column.
+    assert.match(svg[0], /viewBox="0 0 440 240"/,
+      `${page}'s #scatter must carry drawScatter's own 440x240 viewBox`);
+  }
+});
+
+test("🔴 the screening pages' own status line is NOT #status", () => {
   // py2Dmol owns #status and writes into it on load; sharing the id let the
   // vendor overwrite the screen's status the moment it initialised.
-  assert.match(html, /id="screen-status"/);
+  for (const page of PAGES) assert.match(read(page), /id="screen-status"/);
   assert.ok(vendorIds().has("status"),
     "if the vendor no longer uses #status this split can be undone");
   assert.doesNotMatch(read("web/screen.js"), /\$\("status"\)/,

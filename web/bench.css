@@ -1,0 +1,511 @@
+/*
+ * bench.css - the stylesheet for bench.html.
+ *
+ * The plan this implements, including the three parts of it that were revised
+ * before any code was written, is docs/BENCH-DESIGN.md. The short version:
+ *
+ *   A virtual screen IS a plate - one target, N compounds, one number per well -
+ *   so the plate is the page's one bold object, and it does three jobs that
+ *   were three separate widgets before: progress while the screen runs, every
+ *   score at a glance when it ends, and navigation (click a well, see that
+ *   molecule alone in the pocket). Everything else is kept quiet.
+ *
+ * 🔴 IT SHARES A CONTROLLER WITH screen.html AND CHANGES NOTHING THERE.
+ * web/screen.js finds its twenty-two elements by id; this page supplies the
+ * same ids in a different arrangement, so there is no second run loop, no
+ * second weight loader and no second copy of the two affinity heads to drift.
+ * screen.css reads neither `--well` nor `[data-id]`, which is why the
+ * controller can hand both pages the plate's data and leave the old page
+ * looking exactly as it did.
+ *
+ * 🔴 NO WEB FONTS, AND THAT IS THE PAGE'S OWN PROMISE RATHER THAN A PREFERENCE.
+ * Nothing here leaves the machine except an optional MSA search; a Google Fonts
+ * link would send every reader's IP to Google on load. Both stacks are system
+ * faces and the personality comes from the treatment.
+ */
+:root {
+  /* the bench: a cool off-white, not the cream a generated page reaches for */
+  --paper: #f4f6f7;
+  --surface: #ffffff;
+  /* a deep slate-navy with a hue, rather than a tinted near-black */
+  --ink: #152430;
+  --quiet: #5e7180;
+  --rule: #cbd5da;
+  /* the plate's carrier: the ONE dark object on the page, and it holds data */
+  --carrier: #11212b;
+  --carrier-ink: #e7eef2;
+
+  /* 🔴 THE RAMP IS NOT PART OF THE PALETTE, AND THAT IS THE POINT. These two
+     are web/screen-scene.js's `scoreColour` ends, unchanged: colour-blind safe,
+     and cool/warm even in greyscale. They are the only saturated colours on the
+     page and they mean SCORE and nothing else - the same two ends colour the
+     wells here, the points in the scatter, the swatches in the table and the
+     atoms in the 3D scene. Learn one ramp, read the whole page. */
+  --cool: #3156b8;
+  --warm: #d66c14;
+  --fault: #9e2b20;
+
+  --stage: 1180px;
+  /* 🔴 TWO FACES, ONE RULE: measured things are monospaced, language is not. A
+     sequence because residues line up, a score because a column of numbers has
+     to be comparable down the column. The same face on a LABEL would be
+     costume, so labels stay in the sans. */
+  --sans: "Avenir Next", Avenir, "Segoe UI Variable Text", Candara,
+    "Trebuchet MS", system-ui, sans-serif;
+  --mono: "SF Mono", Menlo, "Cascadia Mono", Consolas, ui-monospace, monospace;
+}
+
+* { box-sizing: border-box; }
+
+/* 🔴 THE GROUND GOES ON `html` TOO. Once the body is a centred column the
+   body's background stops covering the viewport and the margins show white.
+   web/screen.css hit this; it is not a new finding, just the same one. */
+html { background: var(--paper); }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 16px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Every number, sequence, SMILES and machine readout. */
+.measure, #screen-status, #eta, #scene-note, textarea, input, select,
+#queue span, table, .readout {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+h1, h2 { margin: 0; font-weight: 600; letter-spacing: -0.02em; }
+h1 { font-size: 1.953rem; line-height: 1.1; }
+h2 { font-size: 1.25rem; line-height: 1.2; }
+p { margin: 0; }
+
+a { color: var(--ink); text-decoration-color: var(--rule); }
+a:hover { text-decoration-color: currentColor; }
+
+/* 🔴 A VISIBLE FOCUS RING ON EVERYTHING REACHABLE, in the ink rather than the
+   data ramp: a reader must never have to guess where the keyboard is, and a
+   blue ring here would be the one colour that is supposed to mean score. */
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+/* ---------- masthead ------------------------------------------------- */
+
+.masthead {
+  max-width: var(--stage);
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 1.75rem;
+  display: flex;
+  gap: 1.5rem;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.standfirst {
+  margin-top: 0.5rem;
+  max-width: 54ch;
+  color: var(--quiet);
+}
+.actions { display: flex; gap: 0.5rem; }
+
+button {
+  font: 1rem/1 var(--sans);
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--ink); }
+/* 🔴 THE PRIMARY BUTTON IS INK, NOT BLUE. A blue button would be the second
+   thing on the page wearing the colour that means "score". */
+button.go {
+  background: var(--carrier);
+  border-color: var(--carrier);
+  color: var(--carrier-ink);
+}
+button:disabled { opacity: 0.42; cursor: default; }
+
+/* ---------- the plate ------------------------------------------------ */
+
+.plate-band {
+  background: var(--carrier);
+  color: var(--carrier-ink);
+  padding: 1.5rem 0 1.25rem;
+}
+.plate-inner {
+  max-width: var(--stage);
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
+#queue {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(6.25rem, 1fr));
+  gap: 3px;
+}
+
+/* 🔴 AN EMPTY PLATE IS AN INVITATION, NOT A BLANK. Before a run there are no
+   wells at all, and an empty dark band with a caption under it reads as a
+   broken page rather than a waiting one. */
+#queue:empty {
+  display: block;
+  border: 1px dashed rgba(231, 238, 242, 0.28);
+  border-radius: 2px;
+  padding: 1.25rem 1rem;
+}
+#queue:empty::after {
+  content: "No molecules queued yet. Paste SMILES below, then run the screen.";
+  color: rgba(231, 238, 242, 0.6);
+  font: 0.8rem/1.4 var(--mono);
+}
+
+/* One well: a band of score colour over the molecule's name.
+   🔴 THE COLOUR IS A BAND RATHER THAN THE WHOLE CELL, because the name has to
+   stay readable. A cell filled with the ramp would need its text to flip from
+   light to dark somewhere in the middle of the scale, which CSS cannot decide
+   and which would put a hard edge across a continuous measurement. */
+#queue span {
+  --well: rgba(231, 238, 242, 0.22);
+  position: relative;
+  display: block;
+  padding: 17px 5px 4px;
+  font-size: 0.65rem;
+  line-height: 1.3;
+  color: rgba(231, 238, 242, 0.58);
+  background: rgba(231, 238, 242, 0.05);
+  border-radius: 2px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* 🔴 THE BAND IS 12px, NOT 3px, BECAUSE 3px LOST THE ARGUMENT. The first build
+   gave each well a 3px rule of score colour over a 100px-wide name, and the
+   screenshot settled it: the measurement was a hairline and the molecule's id -
+   which on a real screen is `ligand_0007`, the least interesting thing in the
+   cell - was the whole object. The boldness is supposed to be spent on the
+   data. The band is now the dominant half of the well and the name sits under
+   it, quieter and smaller. */
+#queue span::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 12px;
+  background: var(--well);
+}
+/* 🔴 THE ONE MOMENT OF MOTION ON THIS PAGE: a well taking its colour as its
+   result lands. It answers an event rather than a page load, it is the only
+   thing that moves, and it is inside the reduced-motion query like the running
+   well's pulse - a reader who has asked for less motion gets the colour
+   immediately rather than not at all. */
+@media (prefers-reduced-motion: no-preference) {
+  #queue span::before { transition: background-color 420ms ease-out; }
+}
+#queue span.done { color: var(--carrier-ink); cursor: pointer; }
+#queue span.done:hover { background: rgba(231, 238, 242, 0.13); }
+#queue span.running {
+  --well: var(--carrier-ink);
+  color: var(--carrier-ink);
+}
+#queue span.failed, #queue span.refused, #queue span.skipped {
+  --well: var(--fault);
+  color: #e6a9a2;
+}
+
+/* The running well is the one thing that should pull the eye while you wait. */
+@media (prefers-reduced-motion: no-preference) {
+  #queue span.running::before { animation: well-wait 1.4s ease-in-out infinite; }
+}
+@keyframes well-wait { 50% { opacity: 0.25; } }
+
+.plate-caption {
+  margin-top: 0.75rem;
+  max-width: 62ch;
+  font-size: 0.875rem;
+  color: rgba(231, 238, 242, 0.68);
+}
+
+.readout {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(231, 238, 242, 0.16);
+  display: flex;
+  gap: 1.25rem;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: rgba(231, 238, 242, 0.8);
+}
+#screen-status { max-width: 86ch; }
+#screen-status.bad { color: #f0b3ab; }
+#eta { white-space: nowrap; color: var(--carrier-ink); }
+
+/* ---------- the stage ------------------------------------------------- */
+
+main {
+  max-width: var(--stage);
+  margin: 0 auto;
+  padding: 1.75rem 1.5rem 3rem;
+}
+
+/* 🔴 ONE SEPARATOR RULE, USED ONLY BETWEEN DIFFERENT KINDS OF THING. Borders
+   that wrap every block turn into the six-identical-cards look; a rule between
+   "setting up a run" and "reading a run" says something. */
+.band + .band {
+  margin-top: 1.75rem;
+  padding-top: 1.75rem;
+  border-top: 1px solid var(--rule);
+}
+
+.setup { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+
+.field { display: flex; flex-direction: column; gap: 0.5rem; }
+.field-head, .field-foot {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.field-head label { font-weight: 600; }
+.field-foot { color: var(--quiet); font-size: 0.875rem; }
+.measure { color: var(--quiet); font-size: 0.8rem; }
+
+textarea, input, select {
+  font-size: 0.8125rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  background: var(--surface);
+  color: var(--ink);
+}
+textarea { width: 100%; resize: vertical; line-height: 1.5; }
+select { font-size: 0.8125rem; max-width: 100%; }
+input[type="number"] { width: 4.5rem; }
+input[type="file"] { border: 0; padding: 0; font-size: 0.75rem; }
+
+.dials { display: flex; gap: 1.25rem; align-items: baseline; flex-wrap: wrap; }
+.dials label {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: baseline;
+  font-size: 0.875rem;
+}
+.caution {
+  margin-top: 0.625rem;
+  max-width: 76ch;
+  font-size: 0.875rem;
+  color: var(--quiet);
+}
+
+.stage-controls {
+  margin-top: 0.875rem;
+  display: flex;
+  gap: 1.25rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.stage-controls label { font-size: 0.875rem; margin-right: 0.4rem; }
+#scene-note {
+  margin-top: 0.75rem;
+  max-width: 100ch;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  color: var(--quiet);
+}
+
+/* ---------- results --------------------------------------------------- */
+
+/* The scatter draws in a fixed 440x240 space and scales with its column, so a
+   narrow column shrinks its axis type too; 6/7 keeps it near its native size
+   while leaving the table room for eight numeric columns. */
+.results { display: grid; grid-template-columns: 6fr 7fr; gap: 1.75rem; }
+.panel-head { margin-bottom: 0.625rem; }
+.panel-note {
+  margin-top: 0.375rem;
+  max-width: 68ch;
+  font-size: 0.875rem;
+  color: var(--quiet);
+}
+#scatter { display: block; width: 100%; height: auto; }
+/* The scatter's axes are drawn with presentation attributes, which any
+   stylesheet outranks - so the plot joins this page's palette without
+   screen-view.js knowing there is a second page. The circles are left alone:
+   they carry the ramp. */
+#scatter line { stroke: var(--rule); }
+#scatter text { fill: var(--quiet); }
+
+.scroll { max-height: 26rem; overflow: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
+th, td {
+  text-align: right;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+th:first-child, td:first-child, th.left, td.left { text-align: left; }
+/* 🔴 SENTENCE CASE, NOT UPPERCASE. The authored labels are "P(binder)",
+   "pIC50", "ipTM" - names with meaning in their capitals, which the old page's
+   `text-transform: uppercase` flattened to PIC50 and IPTM. */
+th {
+  position: sticky;
+  top: 0;
+  background: var(--paper);
+  cursor: pointer;
+  user-select: none;
+  font-weight: 600;
+  color: var(--quiet);
+}
+th.sorted { color: var(--ink); }
+td.smiles {
+  max-width: 13rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--quiet);
+}
+tr.refused td, tr.failed td { color: var(--fault); }
+tr.skipped td { color: var(--quiet); }
+.swatch {
+  display: inline-block;
+  width: 0.65rem;
+  height: 0.65rem;
+  border-radius: 1px;
+  vertical-align: -1px;
+  margin-right: 0.4rem;
+}
+.warn { color: var(--fault); }
+
+#caveats {
+  max-width: 72ch;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--ink);
+}
+
+footer {
+  max-width: var(--stage);
+  margin: 0 auto;
+  padding: 0 1.5rem 3rem;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  color: var(--quiet);
+}
+footer p + p { margin-top: 0.625rem; }
+
+/* ---------- the 3D canvas -------------------------------------------- */
+
+/* 🔴 BOTH GROUPS OF RULES ARE REQUIRED, AND THAT WAS MEASURED THE HARD WAY.
+   web/screen.css's own header records four failed attempts: py2Dmol lays
+   `#mainContainer` out as a flex ROW and, once a structure loads, WRAPS the
+   canvas box in `.py2dmol-slot > .py2dmol-slot-body`, which its stylesheet
+   pins to 600x600 - so `width: 100%` on `#canvasContainer` resolved to 100% of
+   600. Stating the widths alone leaves the slot body pinned; overriding the
+   slot body alone leaves `#mainContainer` sizing to its content. A check on a
+   freshly loaded page cannot see any of it, because the wrapper does not exist
+   until the first scene arrives. Do not tidy either group away without
+   re-measuring the ancestor chain AFTER a scene has loaded. */
+#viewer-container { width: 100%; }
+#viewer-container #mainContainer {
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+}
+#viewer-container #viewerColumn,
+#viewer-container #rightPanelsContainer { width: 100%; }
+/* 🔴 480 RATHER THAN 600, MEASURED FROM A SCREENSHOT - AND THE HEIGHT HAS TO BE
+   SET ON THE SLOT BODY, NOT ONLY ON `#canvasContainer`. py2Dmol fits its camera
+   to the structure, and the structure here is one small protein: at 600 tall
+   and 1130 wide, two thirds of the box was white. Setting the container alone
+   did nothing visible, and the probe said why - `canvas.height` still read 600,
+   because the vendor pins `.py2dmol-slot--1 > .py2dmol-slot-body` to 600x600
+   and sizes the canvas from THAT box. It is the same trap as the width, which
+   web/screen.css's header records costing four attempts: the box that is wrong
+   is the wrapper, and the wrapper does not exist until the first scene loads. */
+#viewer-container .py2dmol-slot,
+#viewer-container .py2dmol-slot > .py2dmol-slot-body { width: 100%; }
+#viewer-container .py2dmol-slot > .py2dmol-slot-body { height: 480px; }
+#viewer-container #canvasContainer { width: 100%; height: 480px; }
+
+/* 🔴 THE VIEWER'S OWN BUTTONS JOIN THIS PAGE, because they were the one piece
+   of borrowed interface left: six grey pills in a rounded tray, in py2Dmol's
+   palette and radius rather than this page's, sitting directly under the
+   canvas where they read as a different product. Only colour, border and radius
+   are touched - the vendor's panel builds and positions itself at runtime and
+   its layout is left exactly alone. */
+#viewer-container #controlsContainer {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  /* the vendor sets `padding: var(--container-padding) 16px`; with the tray's
+     background and border gone, side padding only pushes the buttons out of
+     line with the canvas above them */
+  padding: 0.75rem 0 0;
+}
+/* 🔴 AND THE CONTROLS ARE `label.btn-toggle > span`, NOT `button`, AND THEY ARE
+   NOT INSIDE `#controlsContainer`. Only Capture is a real button; Orient,
+   Focus, Rotate, Style and Clip are LABELS wrapping a hidden checkbox, because
+   they latch - and they live in `#navigationControls`, inside
+   `#rightPanelsContainer`, which is a SIBLING of the controls tray. A rule
+   scoped to `#controlsContainer .btn-toggle` therefore matched nothing at all,
+   and the screenshot after that attempt looked identical. What settled it was
+   asking the page for the computed style:
+   `#controlsContainer .btn-toggle > span` was `null` while the real button's
+   background was already `rgb(255,255,255)` - so the override worked and the
+   selector was pointed at the wrong box. Scoped to the viewer instead, which
+   also picks up the Style panel's buttons, and they are this page's controls
+   too. */
+#viewer-container #controlsContainer button,
+#viewer-container .btn-toggle > span {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  box-shadow: none;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-weight: 500;
+}
+#viewer-container #controlsContainer button:hover,
+#viewer-container .btn-toggle > span:hover {
+  border-color: var(--ink);
+  background: var(--surface);
+}
+/* 🔴 AND A LATCHED CONTROL HAS TO LOOK LATCHED. The vendor's pressed state is
+   `.btn-toggle[aria-pressed="true"] > span` - no id, so the rule above now
+   outranks it and would have flattened Orient, Focus and Rotate into looking
+   permanently off. This is the state in this page's own ink, the same dark the
+   primary button uses. */
+#viewer-container .btn-toggle[aria-pressed="true"] > span,
+#viewer-container .btn-toggle[aria-expanded="true"] > span,
+#viewer-container .btn-toggle input:checked + span {
+  background: var(--carrier);
+  border-color: var(--carrier);
+  color: var(--carrier-ink);
+}
+
+/* 🔴 py2Dmol's OWN OBJECT PICKER IS HIDDEN, because here it can only ever hold
+   one entry. The whole visible scene is concatenated into a SINGLE object (see
+   `drawScene` in web/screen.js), so the vendor's dropdown reads "screen" and
+   cannot list molecules; `#show-ligand` is the picker that can. The select
+   stays in the DOM - the renderer's change listener and a restored session
+   both drive the current object through it. */
+#viewer-container #objectRow { display: none; }
+
+/* ---------- narrow screens ------------------------------------------- */
+
+@media (max-width: 900px) {
+  .masthead { padding: 1.75rem 1rem 1.25rem; align-items: flex-start; }
+  h1 { font-size: 1.5rem; }
+  .plate-inner, main, footer { padding-left: 1rem; padding-right: 1rem; }
+  .setup, .results { grid-template-columns: 1fr; gap: 1.25rem; }
+  #queue { grid-template-columns: repeat(auto-fill, minmax(4.75rem, 1fr)); }
+  .readout { flex-direction: column; gap: 0.35rem; }
+  #viewer-container .py2dmol-slot > .py2dmol-slot-body,
+  #viewer-container #canvasContainer { height: 380px; }
+  .scroll { max-height: 20rem; }
+}

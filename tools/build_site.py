@@ -57,7 +57,14 @@ FILES = [".nojekyll", "index.html", "dev.html"]
 # must not become a published page that 404s. Copied when present so a local
 # build has the page; publish the bundle, pin its revision, and it is a site
 # page with no further change here.
-OPTIONAL = ["single.html", "proteinhunter.html", "design.html", "screen.html"]
+# 🔴 AND `bench.html` IS ON THE SAME FOOTING AS `screen.html` FOR THE SAME
+# REASON: it is a second front end over the same controller, so it opens the
+# same `boltz2-affinity` bundle and is exactly as unservable as that bundle is.
+# It is listed in PAGE_BUNDLES below for that, not only here - OPTIONAL alone
+# means "copy it if the source is there", which is what let an unservable page
+# ship once already.
+OPTIONAL = ["single.html", "proteinhunter.html", "design.html", "screen.html",
+            "bench.html"]
 # 🔴 AND `webgl` IS ON THIS LIST BECAUSE web/af3-model.js IMPORTS IT STATICALLY. Without it this
 # script assembles a dist/ whose web/af3-model.js resolves to nothing - the module never loads and
 # the AF3 fold path is dead for every visitor, WebGPU or not - and the only gate that can see it is
@@ -283,7 +290,8 @@ def unreachable_offers() -> list[str]:
 # has no `remote:` yet" - but `OPTIONAL` only ever meant "copy it if the source
 # is there", so the page shipped anyway. A stated intention that nothing
 # enforces is not a safeguard.
-PAGE_BUNDLES = {"screen.html": "boltz2-affinity"}
+PAGE_BUNDLES = {"screen.html": "boltz2-affinity",
+                "bench.html": "boltz2-affinity"}
 
 
 def unservable_pages() -> list[tuple[str, str]]:

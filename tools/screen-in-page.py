@@ -86,6 +86,15 @@ def main():
     ap.add_argument("--height", type=int, default=900)
     ap.add_argument("--screenshot", default=None,
                     help="write a PNG of the finished page to this path")
+    # 🔴 WHICH PAGE, BECAUSE THERE ARE NOW TWO FRONT ENDS OVER ONE CONTROLLER.
+    # bench.html and screen.html satisfy the same twenty-two ids with different
+    # markup and different stylesheets, so every gate in this file applies to
+    # both - and the one that does not transfer by reading the code is the
+    # canvas-width check, which depends on each page's own CSS fighting
+    # py2Dmol's slot wrapper. Run it twice; a page that is never driven is a
+    # page that is broken and nobody knows.
+    ap.add_argument("--page", default="screen.html",
+                    help="which page on the local server to drive")
     ap.add_argument("--url", default=None,
                     help="drive this URL instead of a local server, e.g."
                          " https://pablo-arantes.github.io/boltz2-webgpu/screen.html")
@@ -135,7 +144,7 @@ def main():
         """)
         ws.call("Emulation.setDeviceMetricsOverride", width=args.width,
                 height=args.height, deviceScaleFactor=1, mobile=False)
-        target = args.url or ("http://127.0.0.1:%d/screen.html" % PORT)
+        target = args.url or ("http://127.0.0.1:%d/%s" % (PORT, args.page))
         print("driving:", target)
         started = time.time()
         ws.call("Page.navigate", url=target)

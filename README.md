@@ -4,9 +4,19 @@ One protein target, many ligands, scored in your browser. No install, no
 server, no upload of your compounds — the model runs on your own GPU through
 WebGPU.
 
-**Live: https://pablo-arantes.github.io/boltz2-webgpu/screen.html**
+**Live: https://pablo-arantes.github.io/boltz2-webgpu/bench.html**
 
-![One target and three ligands: the ranked table, the two-score scatter, and every pose superposed in one scene](docs/assets/screening.png)
+Two front ends, one controller. `bench.html` is the current one: the screen is
+drawn as a plate, one well per molecule, each well taking its score colour as
+its result lands and isolating that molecule in the 3D view when you click it.
+[`screen.html`](https://pablo-arantes.github.io/boltz2-webgpu/screen.html) is
+the first layout, kept and unchanged
+([screenshot](docs/assets/screening.png)). Both load the same `web/screen.js`, so
+there is one run loop, one weight loader and one pair of affinity heads rather
+than two of each. The design is written down, including what was discarded and
+why, in [docs/BENCH-DESIGN.md](docs/BENCH-DESIGN.md).
+
+![The plate across the top, one well per molecule coloured by its score; below it the target with 27 molecules superposed in one scene, the two-score scatter, and the ranked table](docs/assets/bench.png)
 
 ## What it does
 
@@ -78,7 +88,7 @@ Open the live link, or serve the repository yourself:
 
 ```bash
 python3 tools/serve.py        # any static server will do; the page is static
-# then open http://127.0.0.1:8080/screen.html
+# then open http://127.0.0.1:8080/bench.html   (or /screen.html)
 ```
 
 **Requirements**

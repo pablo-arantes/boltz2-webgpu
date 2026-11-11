@@ -54,8 +54,13 @@ scripts = json.loads((root / "package.json").read_text())["scripts"]
 for gate in re.findall(r"\| `(test:[a-z0-9-]+)` \|", t):
     claim(gate in scripts, f"npm script {gate}")
 
-# screen.html is what the page instructions say
+# 🔴 BOTH FRONT ENDS, BECAUSE THE README NAMES BOTH AND LINKS THE NEWER ONE
+# FIRST. A README whose live link points at a page that is not in the tree is
+# the one broken claim a reader hits before any other.
 claim((root / "screen.html").exists(), "app/screen.html exists")
+claim((root / "bench.html").exists(), "app/bench.html exists")
+claim("bench.html" in t and "screen.html" in t,
+      "the README names both front ends")
 claim("8080" in (root / "tools/serve.py").read_text(), "serve.py default port 8080")
 
 # the licence claims
