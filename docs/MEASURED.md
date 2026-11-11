@@ -581,12 +581,57 @@ domain containing the site the right method rather than a workaround - with the
 caveat that the crop has to fold correctly on its own, so it wants the whole
 domain, and both domains when the site is at an interface.
 
-### What is still missing
+### The limit, added and driven (2026-11-11)
 
-**There is no upper length limit on the page.** The only check is
-`sequence.length < 4` in `web/screen.js`. A 2,244-residue paste starts a run
-that cannot finish, and fails somewhere in the middle rather than at the point
-the reader could have been told.
+`web/target-size.js` is a pure function from a residue count and a device's
+`maxStorageBufferBindingSize` to one of five verdicts, and `web/screen.js`
+refuses on the Run click before anything is spent. 11 tests in
+`test/target-size.test.js` pin the arithmetic, including that the affinity
+numbers in the advice are the ones `shared/af3/affinity/crop.js` actually holds -
+two copies of a budget is one copy that goes stale, and the stale one would be
+the advice.
+
+🔴 **THE CEILING IS READ OFF THE VISITOR'S OWN DEVICE, and a hardcoded number
+would have been wrong on both machines in this story.** Before `getDevice`
+answers the note uses a conservative 2 GiB (ceiling 2,047), because it is drawn
+while the weights are still downloading and must not promise more than the
+weakest common case; it sharpens once the device is known. Driven on this M3
+Pro, 4 GiB binding, ceiling 2,896:
+
+| target | verdict | what the reader sees |
+| --- | --- | --- |
+| 4,000 aa | **refused** | run does not start, nothing queued, Run stays enabled; the status line gives the pair size (7.63 GiB), the device's limit, the ceiling, and the crop advice |
+| 2,244 aa | **warned, not blocked** | the note is red and names the 297-residue measured limit; the run starts, because the reader is allowed to spend their own time |
+| 250 aa | noted | "the affinity head reads at most 200 of them, round the ligand" |
+| 99 aa | quiet | "99 residues" |
+
+Both pages, since the controller is shared (`npm run test:too-long`).
+
+🔴 **AND THE WARNING THRESHOLD IS "PAST WHAT WAS MEASURED", NOT A CLIFF SOMEONE
+IMAGINED.** 297 residues is the largest length timed here, so that is the number
+the page quotes, and the warning gives **no time estimate** above it: the
+measured curve runs 99-297 and extrapolating it is inventing a number, which in
+a warning is worse than being vague. What it does give is exact - the pair
+tensor's size, and that several are live at once.
+
+### 🔴 THREE PROBE BUGS IN ONE GATE, ALL FOUND BY RUNNING IT
+
+The `--too-long` arm took three tries, and each failure looked like a page bug:
+
+1. **It typed before the controller existed.** `#run` is in the markup, so
+   `wait_for("#run !== null")` succeeds before `web/screen.js` has attached a
+   single listener - the sequence note stayed at "one protein chain, amino
+   acids" and the gate blamed the page. It waits for `__screenResults`, which
+   `refresh()` publishes at module load.
+2. **It clicked Run while Run was disabled.** `boot()` keeps it disabled through
+   the weight download, so the click did nothing and the absence of a refusal
+   read as a missing refusal.
+3. 🔴 **IT HARDCODED THE CEILING IT WAS TESTING.** The gate asserted that 2,244
+   residues is refused; this adapter reports 4 GiB, the ceiling is 2,896, and
+   2,244 is a warning that correctly let the run start. **A gate that hardcodes
+   a device limit tests the machine, not the page** - it now asks the adapter
+   and asserts the matching behaviour, so it is correct on hardware nobody here
+   has.
 
 ### Two probe bugs this measurement found
 

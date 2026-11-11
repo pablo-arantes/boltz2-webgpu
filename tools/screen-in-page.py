@@ -61,6 +61,38 @@ FAKE_AGENTS = {
                " (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
 }
 
+CEILING = """(async () => {
+              const a = await navigator.gpu.requestAdapter(
+                { powerPreference: 'high-performance' });
+              const binding = a.limits.maxStorageBufferBindingSize;
+              return {
+                binding,
+                gib: (binding / 2 ** 30).toFixed(2) + ' GiB',
+                ceiling: Math.floor(Math.sqrt(binding / (128 * 4))),
+              };
+            })()"""
+
+TOO_LONG_SETUP = """((n) => {
+              const box = document.getElementById('sequence');
+              box.value = 'A'.repeat(n);
+              box.dispatchEvent(new Event('input', { bubbles: true }));
+              const ligands = document.getElementById('ligands');
+              ligands.value = 'CCO ethanol';
+              ligands.dispatchEvent(new Event('input', { bubbles: true }));
+            })(%d)"""
+
+PROBE_TOO_LONG = """(() => {
+              const note = document.getElementById('sequence-note');
+              return {
+                note: note.textContent,
+                warned: note.classList.contains('warn'),
+                status: document.getElementById('screen-status').textContent,
+                queue: document.querySelectorAll('#queue span').length,
+                rows: document.querySelectorAll('#table tbody tr').length,
+                runEnabled: !document.getElementById('run').disabled,
+              };
+            })()"""
+
 PROBE_DIAGNOSIS = """(() => {
               const panel = document.getElementById('gpu-help');
               const status = document.getElementById('screen-status');
@@ -169,6 +201,14 @@ def main():
     ap.add_argument("--as-ua", default=None, choices=["linux", "windows"],
                     help="report a different platform's user agent, to drive"
                          " that platform's diagnosis")
+    # 🔴 AND THE LENGTH REFUSAL, WHICH IS THE OTHER PATH A READER FOUND BY
+    # HITTING IT. A 2,244-residue target used to start a run, download the
+    # weights and fail in the middle of the first ligand. The refusal has to
+    # happen on the Run click, before anything is spent, and it has to say what
+    # to do - so it is driven rather than reasoned about.
+    ap.add_argument("--too-long", type=int, default=0,
+                    help="paste a target of this many residues and check the"
+                         " page refuses it before spending anything")
     ap.add_argument("--url", default=None,
                     help="drive this URL instead of a local server, e.g."
                          " https://pablo-arantes.github.io/boltz2-webgpu/screen.html")
@@ -232,6 +272,88 @@ def main():
         ws.call("Page.navigate", url=target)
         cdp.wait_for(ws, "document.getElementById('run') !== null", timeout=60,
                      what="the page to load")
+
+        if args.too_long:
+            # 🔴 WAIT FOR THE CONTROLLER, NOT FOR THE MARKUP. `#run` exists as
+            # soon as the HTML parses, which is before web/screen.js has run and
+            # attached its listeners - so typing then left the note reading "one
+            # protein chain, amino acids" and this gate failed on a page that
+            # was working. `__screenResults` is published by `refresh()` at
+            # module load, so it is the signal that the page is live.
+            cdp.wait_for(ws, "globalThis.__screenResults !== undefined",
+                         timeout=60, what="the controller to wire up")
+            cdp.evaluate(ws, TOO_LONG_SETUP % args.too_long)
+            # the note is the IMMEDIATE signal and must not wait for 365 MiB of
+            # weights: a reader pasting a hopeless target should see it at once
+            early = cdp.evaluate(ws, PROBE_TOO_LONG)
+            print("note before the weights:", early["note"])
+            if not early["warned"]:
+                failures.append("the note does not flag the length until the"
+                                " weights have downloaded (%s)" % early)
+            # 🔴 AND THE RUN REFUSAL CAN ONLY BE CHECKED ONCE RUN IS ENABLED.
+            # `boot()` keeps the button disabled while the weights load, so the
+            # first version of this gate clicked a disabled button and read the
+            # absence of a refusal as a missing refusal.
+            cdp.wait_for(ws, "document.getElementById('run').disabled === false",
+                         timeout=args.timeout, what="the weights to load",
+                         progress="document.getElementById('screen-status')"
+                                  ".textContent")
+            # 🔴 THE EXPECTED VERDICT IS THIS DEVICE'S, NOT A CONSTANT. The
+            # ceiling is sqrt(maxStorageBufferBindingSize / 512) residues and it
+            # differs by a thousand residues between machines - so the first
+            # version of this gate asserted that 2,244 residues is refused, and
+            # failed on a correct page: this adapter reports 4 GiB, the ceiling
+            # is 2,896, and 2,244 is a WARNING that correctly let the run start.
+            # A gate that hardcodes a ceiling tests the machine, not the page.
+            ceiling = cdp.evaluate(ws, CEILING, await_promise=True)
+            refuse = args.too_long > ceiling["ceiling"]
+            print("this device: %s binding, ceiling %d residues -> expecting %s"
+                  % (ceiling["gib"], ceiling["ceiling"],
+                     "a refusal" if refuse else "a warning"))
+            cdp.evaluate(ws, "document.getElementById('run').click()",
+                         await_promise=False)
+            time.sleep(1.0)
+            shown = cdp.evaluate(ws, PROBE_TOO_LONG)
+            print("note:", shown["note"])
+            print("status:", shown["status"])
+            print("queued:", shown["queue"], " rows:", shown["rows"],
+                  " warn class:", shown["warned"])
+            if not shown["warned"]:
+                failures.append("the sequence note is not marked as a problem")
+            if refuse:
+                if shown["queue"] or shown["rows"]:
+                    failures.append("the run STARTED on a target this GPU"
+                                    " cannot fold (%s)" % shown)
+                if "crop" not in (shown["status"] or "").lower():
+                    failures.append("the refusal does not say what to do"
+                                    " instead: %r" % shown["status"])
+                if "200" not in (shown["status"] or ""):
+                    failures.append("the refusal does not say the affinity head"
+                                    " reads only 200 residues")
+                if not shown["runEnabled"]:
+                    failures.append("Run stayed disabled after a refusal, so"
+                                    " the reader cannot try a shorter target")
+            else:
+                # under the ceiling the page must NOT block - it warns, and the
+                # reader is allowed to spend their own time
+                if not shown["queue"]:
+                    failures.append("a target inside this GPU's ceiling was"
+                                    " blocked (%s)" % shown)
+                if "crop" not in shown["note"].lower():
+                    failures.append("the warning does not mention cropping:"
+                                    " %r" % shown["note"])
+                # 🔴 AND STOP IT, or this arm folds a 2,244-residue complex for
+                # as long as the probe's timeout allows.
+                cdp.evaluate(ws, "document.getElementById('stop').click()",
+                             await_promise=False)
+            if args.screenshot:
+                shot = ws.call("Page.captureScreenshot", format="png",
+                               captureBeyondViewport=True)
+                pathlib.Path(args.screenshot).write_bytes(
+                    base64.b64decode(shot["data"]))
+                print("screenshot:", args.screenshot)
+            report(failures)
+            return
 
         if args.no_webgpu:
             cdp.wait_for(ws, "globalThis.__gpuAdvice !== undefined",

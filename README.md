@@ -117,6 +117,24 @@ python3 tools/serve.py        # any static server will do; the page is static
 
   If the page says it got no GPU, it now works out which of those cases you are
   in and prints the steps, with a diagnostics line to paste into an issue.
+
+- A target the GPU can hold. The pair representation is
+  `residues² × 128 × 4` bytes, so one tensor alone is 1.91 GiB at 2,000
+  residues, and the trunk needs several of them at once. The hard ceiling is
+  `sqrt(maxStorageBufferBindingSize / 512)` residues — **2,896** where the
+  adapter reports 4 GiB, **2,047** where it reports 2 GiB — and the page reads
+  your own device's limit, refuses above it before spending anything, and warns
+  past the largest length measured here (297 residues).
+
+  🔴 **Crop to the domain that holds the site, and it costs you nothing in the
+  score.** Boltz-2's affinity module reads at most 256 tokens, at most 200 of
+  them protein, within 10 Å of the ligand — upstream's own `AffinityCropper`
+  defaults, which this port follows. A longer target only changes the structure
+  the score is read off. Keep the whole domain rather than a shell, since the
+  crop still has to fold on its own, and keep both domains when the site sits
+  between them. Measured on an M3 Pro at 1 recycle / 12 steps, one ligand:
+  **7.4 s at 99 residues, 20.9 s at 198, 32.2 s at 297** — so a 300-residue
+  domain screens 100 molecules in about an hour.
 - A **one-off weights download**, cached in CacheStorage afterwards: 365 MiB
   for the structure bundle, plus 6.5 MiB for the affinity module, fetched from
   a pinned Hugging Face revision. Nothing is installed and no weight lives in

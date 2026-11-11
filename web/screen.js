@@ -32,6 +32,7 @@ import { ScreenScene, scoreDomain, scoreColour, renumberLigand }
 import { drawScatter, drawTable, DEFAULT_SORT, startsDescending }
   from "./screen-view.js";
 import { screenArchive, statusOf } from "./screen-export.js";
+import { targetSizeAdvice } from "./target-size.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -63,6 +64,37 @@ const state = {
   settings: null,
   sequence: "",
 };
+
+/**
+ * What this machine can co-fold, and what the sequence box should say about it.
+ *
+ * 🔴 THE DEVICE'S OWN LIMIT WHENEVER THERE IS A DEVICE. The ceiling is
+ * `sqrt(maxStorageBufferBindingSize / 512)` residues and it differs by a
+ * thousand residues between the machines this page runs on, so a hardcoded
+ * number would refuse a target one visitor can fold and accept one another
+ * cannot. Before `boot()` answers, the advice uses the conservative assumption
+ * and `showTargetSize` is called again afterwards so the number sharpens.
+ */
+function targetAdvice() {
+  const residues = $("sequence").value.replace(/\s+/g, "").length;
+  const limits = state.loaded?.device?.limits;
+  return targetSizeAdvice(residues, {
+    bindingBytes: limits?.maxStorageBufferBindingSize,
+    measured: limits !== undefined,
+  });
+}
+
+/** Put the target's size, and any warning about it, under the sequence box. */
+function showTargetSize() {
+  const advice = targetAdvice();
+  const note = $("sequence-note");
+  note.textContent = advice.note;
+  // both pages style `.warn`, so the one class works on either
+  note.classList.toggle("warn",
+                        advice.level === "warn" || advice.level === "refuse");
+  note.title = advice.message;
+  return advice;
+}
 
 function say(message, bad = false) {
   const box = $("screen-status");
@@ -742,6 +774,8 @@ async function boot() {
     say(`affinity weights ${done} MiB`);
   });
   state.loaded = { device, structure, affinity };
+  // the ceiling in the note was the conservative assumption until now
+  showTargetSize();
   say(`Ready. Boltz-2 ${structure.depths.pairformerBlocks} trunk blocks,`
     + ` ${affinity.tensors} affinity tensors`
     + ` (${(affinity.bytes / 1048576).toFixed(0)} MiB decoded).`
@@ -767,6 +801,21 @@ async function screen() {
   if (state.running) return;
   const sequence = $("sequence").value.replace(/\s+/g, "").toUpperCase();
   if (sequence.length < 4) { say("paste a protein sequence first", true); return; }
+  // 🔴 REFUSED HERE, BEFORE ANYTHING IS SPENT. A target past this GPU's pair
+  // ceiling cannot be folded at all, and the page used to find that out in the
+  // middle of the first ligand - after the weights had downloaded, with no
+  // mention of the length. The advice names the arithmetic and what to do, and
+  // a refusal costs the reader nothing but the sentence.
+  const size = showTargetSize();
+  if (size.level === "refuse") {
+    say(size.message, true);
+    return;
+  }
+  // 🔴 A WARNING GOES IN THE NOTE, NOT THE STATUS LINE. `say` here would be
+  // overwritten by "[1/N] ligand_0001" within a few milliseconds - a warning
+  // nobody can read is worse than none, because it looks like diligence. The
+  // note under the sequence box carries it, coloured, for as long as the
+  // sequence is there.
   const entries = readLigands();
   if (entries.length === 0) { say("no ligands to screen", true); return; }
 
@@ -981,11 +1030,7 @@ function wire() {
     $("ligands").value = await file.text();
     readLigands();
   });
-  $("sequence").addEventListener("input", () => {
-    const length = $("sequence").value.replace(/\s+/g, "").length;
-    $("sequence-note").textContent = length === 0
-      ? "one protein chain, amino acids" : `${length} residues`;
-  });
+  $("sequence").addEventListener("input", showTargetSize);
   $("colour-by").addEventListener("change", () => {
     state.colourBy = $("colour-by").value;
     // 🔴 REPAINTED, NOT RE-LOADED. Handing py2Dmol the same structure again
