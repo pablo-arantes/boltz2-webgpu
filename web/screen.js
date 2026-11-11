@@ -34,6 +34,15 @@ import { drawScatter, drawTable, DEFAULT_SORT, startsDescending }
 import { screenArchive, statusOf } from "./screen-export.js";
 
 const $ = (id) => document.getElementById(id);
+
+/**
+ * 🔴 NOT A COLUMN, AND THAT IS WHY IT HAS A NAME. The other three values of
+ * `COLOUR BY` are keys into a result; this one means "don't colour by a score
+ * at all - give every ligand its own colour, the way the viewer would". Every
+ * place that reads `state.colourBy` as a column has to know the difference, so
+ * the sentinel is written once and compared, never typed out.
+ */
+const RAINBOW = "rainbow";
 const state = {
   results: [],
   jobs: [],
@@ -42,6 +51,9 @@ const state = {
   // {id, chain, resSeq} per visible ligand in the scene as last drawn, so a
   // colour change can repaint without re-loading (which resets the camera)
   scenePlaced: [],
+  // ligand id -> the colour the VIEWER chose, read back in rainbow mode so the
+  // table swatch and the scatter point keep matching the atoms on screen
+  sceneColours: new Map(),
 
   sort: { ...DEFAULT_SORT },
   colourBy: "affinity_probability_binary",
@@ -139,10 +151,11 @@ function refresh() {
   // thing from what the ZIP is made of.
   globalThis.__screenResults = state.results;
   persistResults();
+  const colours = state.colourBy === RAINBOW ? state.sceneColours : undefined;
   drawScatter($("scatter"), state.results,
-    { colourBy: state.colourBy, highlight: state.highlight });
+    { colourBy: state.colourBy, highlight: state.highlight, colours });
   drawTable($("table"), state.results, {
-    sort: state.sort, colourBy: state.colourBy, visible: state.visible,
+    sort: state.sort, colourBy: state.colourBy, visible: state.visible, colours,
     onSort: (key) => {
       state.sort = state.sort.key === key
         ? { key, ascending: !state.sort.ascending }
@@ -275,9 +288,15 @@ function paintScene(placed) {
     const renderer = registry[Object.keys(registry)[0]]?.renderer;
     const objects = renderer?.objectsData;
     if (objects === undefined || objects === null) return false;
-    const position = {};
     const chains = renderer.chains ?? [];
     const residues = renderer.residueNumbers ?? [];
+    // where each ligand's atoms ended up, by the pair that cannot collide
+    const indexOf = new Map();
+    for (let at = 0; at < chains.length; at += 1) {
+      const key = `${chains[at]}|${residues[at]}`;
+      if (!indexOf.has(key)) indexOf.set(key, at);
+    }
+    const position = {};
     for (let at = 0; at < chains.length; at += 1) {
       const colour = wanted.get(`${chains[at]}|${residues[at]}`);
       if (colour !== undefined) position[at] = colour;
@@ -290,11 +309,36 @@ function paintScene(placed) {
     if (names.length === 0) return false;
     for (const name of names) {
       if (objects[name] === undefined) continue;
-      objects[name].color = { type: "advanced", value: { chain, position } };
+      // 🔴 RAINBOW HANDS THE SCENE BACK, IT DOES NOT PAINT A RAINBOW. The
+      // per-ligand colours a reader means by "rainbow" are py2Dmol's own
+      // palette, cycled over the chain letters - so the right thing is to
+      // REMOVE our colour and let the viewer colour the object it holds. That
+      // also re-arms the viewer's own Style > colour control, which an advanced
+      // colour map overrides for every atom it names: with a score ramp on, the
+      // vendor's eleven colour modes silently do nothing to the ligands.
+      if (state.colourBy === RAINBOW) delete objects[name].color;
+      else objects[name].color = { type: "advanced", value: { chain, position } };
     }
     renderer.colorsNeedUpdate = true;
     renderer.plddtColorsNeedUpdate = true;
     renderer.render?.("screen-colour");
+    // 🔴 AND THE SWATCHES FOLLOW THE VIEWER, NOT THE OTHER WAY ROUND. In
+    // rainbow mode the page does not know what colour a ligand is - py2Dmol
+    // chose it - so it asks, per ligand, for the colour of one of its atoms.
+    // Without this the table and the scatter would fall back to a score ramp
+    // nothing in the picture uses, and the swatch would stop meaning "this row
+    // is that ligand on screen", which is the one job it has.
+    state.sceneColours = new Map();
+    if (state.colourBy === RAINBOW) {
+      for (const spot of placed) {
+        const at = indexOf.get(`${spot.chain}|${spot.resSeq}`);
+        const rgb = at === undefined ? null : renderer.getAtomColor?.(at);
+        if (rgb === null || rgb === undefined) continue;
+        state.sceneColours.set(spot.id, "#" + [rgb.r, rgb.g, rgb.b]
+          .map((part) => Math.max(0, Math.min(255, Math.round(part)))
+            .toString(16).padStart(2, "0")).join(""));
+      }
+    }
     return true;
   } catch (error) {
     console.error("the scene could not be coloured", error);
@@ -400,6 +444,11 @@ function drawScene() {
       .then(() => {
         revealViewer();
         paintScene(placed);
+        // 🔴 AND THE TABLE IS REDRAWN AFTER A RAINBOW PAINT, because the
+        // colours did not exist when it was drawn: the run loop refreshes and
+        // THEN the load settles, so the swatches would show the previous
+        // ligand's palette - one ligand behind, for the whole screen.
+        if (state.colourBy === RAINBOW) refresh();
         requestAnimationFrame(revealViewer);
       })
       // 🔴 AN ASYNC REFUSAL MUST BE REPORTED, NOT SWALLOWED. `py2dmolLoadFiles`
@@ -458,6 +507,16 @@ function colourLegend() {
   const domain = scoreDomain(done, state.colourBy);
   const label = $("colour-by")?.selectedOptions?.[0]?.textContent
     ?? state.colourBy;
+  if (state.colourBy === RAINBOW) {
+    // 🔴 THE REPEAT IS PART OF THE LEGEND. py2Dmol's palette holds 16 colours
+    // and cycles: measured on a 27-ligand scene, ligand 17 came out in ligand
+    // 1's colour. The table swatch is read back from the viewer so a row still
+    // points at the right atoms, but two ligands CAN share a colour - which a
+    // reader must be told, or they will read them as one.
+    return "one colour per ligand from the viewer's own palette, not the score"
+      + " - 16 colours, so they repeat on a long screen; the table swatch is"
+      + " the colour the viewer chose. Pick a score column to rank by colour.";
+  }
   if (!Number.isFinite(domain.lo) || !Number.isFinite(domain.hi)) {
     return "ligands uncoloured until a ligand scores";
   }

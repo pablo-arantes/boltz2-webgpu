@@ -117,6 +117,13 @@ export function drawScatter(svg, results, options = {}) {
 
   const column = options.colourBy ?? "affinity_probability_binary";
   const domain = scoreDomain(done, column);
+  // 🔴 AND AN OVERRIDE, FOR THE MODE WHERE THE COLOUR IS NOT A SCORE. "one
+  // colour per ligand" is the VIEWER's palette, which this module cannot
+  // compute - it belongs to py2Dmol. The page reads it back off the renderer
+  // and passes it here, so the swatch and the point keep matching the atoms on
+  // screen in every mode rather than only in the ones with a ramp.
+  const fillFor = (result) => options.colours?.get(result.id)
+    ?? scoreColour(result[column], domain.lo, domain.hi);
   for (const result of done) {
     const confidence = Number.isFinite(result.iptm) ? result.iptm : 0;
     // 🔴 THE RADIUS FLOOR IS NOT COSMETIC: a zero-confidence ligand must still
@@ -125,7 +132,7 @@ export function drawScatter(svg, results, options = {}) {
     const radius = 3 + 5 * Math.max(0, Math.min(1, confidence));
     const point = node("circle", {
       cx: x(result.pIC50), cy: y(result.affinity_probability_binary), r: radius,
-      fill: scoreColour(result[column], domain.lo, domain.hi),
+      fill: fillFor(result),
       "fill-opacity": (0.35 + 0.55 * Math.max(0, Math.min(1, confidence))).toFixed(2),
       stroke: result.id === options.highlight ? "#111827" : "#ffffff",
       "stroke-width": result.id === options.highlight ? 2 : 1,
@@ -244,8 +251,10 @@ export function drawTable(table, results, options) {
         const swatch = document.createElement("span");
         swatch.className = "swatch";
         swatch.style.background = status === "done"
-          ? scoreColour(result[options.colourBy ?? "affinity_probability_binary"],
-                        domain.lo, domain.hi)
+          ? (options.colours?.get(result.id)
+             ?? scoreColour(result[options.colourBy
+                                   ?? "affinity_probability_binary"],
+                            domain.lo, domain.hi))
           : "transparent";
         cell.append(swatch);
         const box = document.createElement("input");

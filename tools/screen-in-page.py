@@ -521,6 +521,79 @@ def main():
                     " ligands are drawn with the worse one WARMER, so the"
                     f" ramp does not follow the ranking - first {backwards[0]}"
                     f" of {len(warmth)} ligands")
+        # 🔴 AND THE "one colour per ligand" MODE MUST LEAVE THE RAMP. It is
+        # the only entry in COLOUR BY that is NOT a column: it deletes the
+        # page's colour from the object and lets py2Dmol colour the scene, so
+        # the failure to look for is the opposite of the others - a ligand still
+        # wearing the score ramp's blue or orange means the advanced colour map
+        # was not removed and the viewer's own palette is being overridden.
+        # The swatches are read too: the page asks the renderer what colour each
+        # ligand came out and feeds that to the table, so a swatch that does not
+        # match its atoms means the readback is broken and a row no longer
+        # points at a ligand on screen.
+        cdp.evaluate(ws, """(() => {
+          const select = document.getElementById('colour-by');
+          select.value = 'rainbow';
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+        })()""")
+        time.sleep(0.5)
+        bowed = cdp.evaluate(ws, probe_colours)
+        swatches = cdp.evaluate(ws, """(() => {
+          const out = {};
+          for (const tr of document.querySelectorAll('#table tbody tr')) {
+            const swatch = tr.querySelector('.swatch');
+            const id = tr.querySelector('td')?.textContent?.trim();
+            if (!swatch || !id) continue;
+            out[id.replace(/\s*⚠$/, '')] =
+              getComputedStyle(swatch).backgroundColor;
+          }
+          return out;
+        })()""")
+        print("one colour per ligand:", bowed)
+        print("table swatches:", swatches)
+        # 🔴 AND A PICTURE OF THIS MODE TOO. The colours here are the VIEWER's,
+        # read back off the renderer and fed to the table - a readback that is
+        # wrong by a row, or off by a chain, produces numbers that all agree
+        # with each other and a picture where the swatches point at the wrong
+        # ligands. The final screenshot is taken with a score column selected,
+        # so without this one nobody ever looks at this mode.
+        if args.screenshot:
+            spare = pathlib.Path(args.screenshot)
+            spare = spare.with_name(f"{spare.stem}-viewer-palette{spare.suffix}")
+            shot = ws.call("Page.captureScreenshot",
+                           format="png", captureBeyondViewport=True)
+            spare.write_bytes(base64.b64decode(shot["data"]))
+            print("screenshot:", spare)
+        if bowed is None or len(bowed["ligands"]) != len(ligands):
+            failures.append(f"one colour per ligand lost ligands ({bowed})")
+        else:
+            on_ramp = {id_: rgb for id_, rgb in bowed["ligands"].items()
+                       if rgb in (WARM, COOL)}
+            if on_ramp:
+                failures.append("with the ramp off, these ligands are still"
+                                f" painted by the page: {on_ramp}")
+            # 🔴 THE PALETTE HOLDS 16 AND CYCLES, so this cannot ask for one
+            # colour per ligand: measured on a 27-ligand scene, exactly 16
+            # distinct colours with ligand 17 wearing ligand 1's. What it can
+            # require is that the viewer spread them as far as it has colours -
+            # a drop below that means the page is painting after all, or the
+            # viewer fell back to one colour for the lot.
+            spread = len(set(bowed["ligands"].values()))
+            if spread < min(len(ligands), 16):
+                failures.append(f"the viewer's palette gave {spread} colours"
+                                f" to {len(ligands)} ligands - expected"
+                                f" {min(len(ligands), 16)}"
+                                f" ({bowed['ligands']})")
+            # the swatch must be the colour the renderer actually painted
+            mismatched = {}
+            for id_, rgb in bowed["ligands"].items():
+                want = f"rgb({rgb.replace(',', ', ')})"
+                if swatches.get(id_) != want:
+                    mismatched[id_] = (swatches.get(id_), want)
+            if mismatched:
+                failures.append("the table swatch does not match the atoms in"
+                                f" the scene: {mismatched}")
+
         # 🔴 AND THE COLUMNS MUST BE MADE TO DISAGREE, or the check above
         # passes on a page that ignores the control. Every column ranked these
         # two ligands the same way - the bigger one wins on probability, on
@@ -540,6 +613,8 @@ def main():
           const top = order[0].iptm, bottom = order[order.length - 1].iptm;
           order[0].iptm = bottom;
           order[order.length - 1].iptm = top;
+          // the block above left COLOUR BY on "one colour per ligand"; this
+          // puts it back on a real column, which is what makes a flip visible
           const select = document.getElementById('colour-by');
           select.value = 'iptm';
           select.dispatchEvent(new Event('change', { bubbles: true }));

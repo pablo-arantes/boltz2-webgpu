@@ -552,6 +552,20 @@ only the page is new.
           <option value="affinity_probability_binary" selected>Binding probability (higher is better)</option>
           <option value="affinity_pred_value">pIC50 / IC50-like value (lower value is better)</option>
           <option value="iptm">Interface ipTM (confidence)</option>
+          <!-- 🔴 NOT A COLUMN, AND LABELLED SO. The three above are scores and
+               share one blue-to-orange ramp with the table and the scatter;
+               this one hands the scene back to py2Dmol, which gives each
+               ligand a colour off its own palette. It separates ligands rather
+               than ranking them - useful for picking one out of a crowded
+               pocket - and it is what the page drew before the ramp existed.
+               It also re-arms the viewer's own Style > colour control, which a
+               score ramp overrides for every atom it names.
+               🔴 AND THE LABEL SAYS "16", BECAUSE THE PALETTE REPEATS. Measured
+               on a 27-ligand scene: exactly 16 distinct colours, ligand 17
+               wearing ligand 1's. "one colour per ligand" would be a promise
+               the viewer does not keep past 16, and a reader counting on it
+               would read two ligands as one. -->
+          <option value="rainbow">Viewer's own palette (no ranking; repeats every 16)</option>
         </select>
       </div>
     </div>
