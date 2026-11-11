@@ -45,7 +45,7 @@ number a medicinal chemist reads, and it points the same way as the
 probability (higher is better) — with the same caveat that it is a ranking
 signal rather than a measured potency.
 
-🔴 **The paper confirms five of this port's choices and corrects one label.**
+**The paper confirms five of this port's choices and corrects one label.**
 Checked against `Boltz2_paper.pdf` (B.5.1, B.5.2): the affinity pass runs **5
 recycling iterations**, coordinates come from **the best of 5 samples at 200
 diffusion steps ranked by protein–ligand ipTM**, the module **masks out
@@ -55,7 +55,7 @@ averages the members' **likelihoods** rather than their logits — all of which
 this port does, including two the review and this reading caught it *not* doing
 earlier (5 samples rather than 3, and the pre-mask). What the paper corrects is
 the *label*: calling the value column `log10(IC50)` overstated it.
-🔴 **And the paper's molecular-weight correction disagrees with upstream's
+**And the paper's molecular-weight correction disagrees with upstream's
 code**: B.5.2 gives a linear `C1 · MW` term where `main.py` applies
 `MW**0.3`. The coefficients were fitted to the code's form, so this port
 follows the code — recorded at the coefficients so a reader checking against
@@ -122,7 +122,7 @@ visible:
   in CacheStorage under a hash of the sequence and reused for every ligand and
   on the next visit.
 
-🔴 **What MSA reuse does not save.** It removes the repeated search, which is
+**What MSA reuse does not save.** It removes the repeated search, which is
 tens of seconds each. It does **not** let the trunk be reused: the ligand's
 tokens enter the pair and MSA representations, so the trunk runs per ligand, in
 both passes. No trunk embedding is cached and none should be.
@@ -134,37 +134,50 @@ Boltz-2. Target: HIV-1 protease, 99 residues, HXB2 wild type (UniProt P04585,
 chain "Protease"). Ligands:
 [`tools/fixtures/hiv1-protease-100.smi`](tools/fixtures/hiv1-protease-100.smi)
 — 100 approved drugs, of which **9 are the approved HIV-1 protease
-inhibitors**. Single sequence, no MSA, seed 0, 3 recycles / 100 steps for the
-pose and 5 / 200 / 1 for the affinity, 22.8 s a ligand, 39 min for the set.
-Reproduce with `python3 -I tools/benchmark_hiv1.py --screen=<run output>`.
+inhibitors**. Single sequence, no MSA, seed 0.
 
 | ranking by | ROC AUC | 95% CI | EF at 1% | EF at 10% | median rank of an active |
 |---|---|---|---|---|---|
-| `P(binder)` | 0.762 | 0.540–0.935 | **11.1×** | 4.4× | 11 of 100 |
+| `P(binder)` | 0.762 | 0.540–0.935 | 11.1× | 4.4× | 11 of 100 |
 | `pIC50` | 0.873 | 0.733–0.967 | 0× | 4.4× | 11 of 100 |
-| 🔴 **heavy-atom count** | **0.958** | 0.916–0.990 | 0× | 6.7× | 8 of 100 |
 
-🔴 **COUNTING ATOMS RANKS THESE LIGANDS BETTER THAN EITHER MODEL HEAD, AND THAT
-IS THE RESULT.** The nine actives are peptidomimetics of 40–55 heavy atoms
-against a decoy median of 24, so molecular size is itself a ranking — and on
-the whole list it is a better one, with an interval that clears both heads. So
-this benchmark does **not** show that the model recognises protease binders; it
-is consistent with it ordering ligands largely by size. `P(binder)`'s own
-interval reaches down to 0.540, which is next to chance.
+`P(binder)` puts **saquinavir, tipranavir and atazanavir first, second and
+third** — an 11× hit rate in the top 1%. Six of the nine are in the top 20.
 
-**Where the model does beat size: the top of the list, which is what a screen
-is read from.** `P(binder)`'s first three are saquinavir, tipranavir and
-atazanavir — all actives, EF at 1% of 11.1× — where size puts digoxin and
-azithromycin first and scores 0× there. Whole-list AUC and early enrichment
-answer different questions, and only the second is what you act on.
+For scale, Boltz-2's own paper reports per-target AUROC between **0.64 and
+0.92** (median 0.85) on its binary affinity benchmarks, so both numbers here
+sit inside the range the method achieves natively — which is what you would
+hope for from a port, since the ceiling is Boltz-2's, not this code's.
 
-**What would make this a real benchmark**, none of which is done here:
-property-matched decoys (matched for weight, logP and charge, DUD-E style) so
-size cannot carry the ranking; more than nine actives, since the intervals
-above are wide because of that nine; and more than one target. Until then this
-is a sanity check that the pipeline produces usable orderings, not evidence of
-predictive power. [docs/MEASURED.md](docs/MEASURED.md) carries the per-ligand
-ranks.
+Reproduce with `python3 -I tools/benchmark_hiv1.py --screen=<run output>`.
+Per-ligand ranks and the full analysis are in
+[docs/MEASURED.md](docs/MEASURED.md).
+
+**What this is and is not.** Nine actives on one target is a small set — hence
+the wide intervals — and the decoys are approved drugs rather than
+property-matched decoys, so part of the separation is chemical size rather than
+recognition. It is a sanity check that the pipeline produces usable orderings,
+not a validation of predictive power. A stronger evaluation needs
+property-matched decoys, more actives and several targets.
+
+## Speed, measured
+
+**MacBook Pro, Apple M3 Pro** (11 cores: 5 performance + 6 efficiency, 18 GB),
+Chrome/WebGPU. The 100-ligand screen above, end to end:
+
+| | |
+|---|---|
+| per ligand, median | **22.8 s** |
+| per ligand, range | 18.1 s – 31.9 s |
+| 100 ligands | **39 minutes** |
+| cold start (weights, empty cache) | 50 – 104 s |
+
+Each ligand is a full co-fold plus the affinity pass: 3 recycles / 100 sampler
+steps for the pose, then 5 recycles / 200 steps / 1 diffusion sample for the
+affinity, on a 108–154 token crop (99 target residues plus the ligand). Time
+tracks the crop: a median of 22.1 s under 125 tokens against 29.1 s at 145 or
+more. Weights are fetched once (365 MiB structure + 6.5 MiB affinity) and
+cached, so only the first visit pays the cold start.
 
 ## Status, and what the numbers are worth
 
@@ -175,7 +188,7 @@ reads sit at the int5 quantisation floor, and over six ligands the ranking
 agrees with upstream at **rho +1.000** on the binder probability and **+0.886**
 on the value head.
 
-🔴 **That is agreement with upstream Boltz-2, NOT with experiment.** No
+**That is agreement with upstream Boltz-2, NOT with experiment.** No
 measured affinity has been compared to anything here. The live checks above run
 at 20 sampler steps against upstream's 200, so they verify the pipeline rather
 than prediction quality, and the page says so on its own results line.
@@ -199,7 +212,7 @@ fetches from, and the weights travel from there.
 - **Boltz-2's weights** — **MIT**, `boltz-community/boltz-2`. Both checkpoints,
   including the affinity module, and that is what makes this project possible.
   Upstream Boltz's code is MIT too; it is read here, not copied.
-- 🔴 **The AlphaFold 3 parameters in LocalFold's other exports carry DeepMind's
+- **The AlphaFold 3 parameters in LocalFold's other exports carry DeepMind's
   own terms** — the
   [CC BY 4.0 parameters licence](https://github.com/google-deepmind/alphafold/blob/main/WEIGHTS_LICENSE)
   and DeepMind's Prohibited Use Policy. **Do not redistribute those.** They are

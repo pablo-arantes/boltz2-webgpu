@@ -391,7 +391,15 @@ heavy atom count - THE BASELINE, not a prediction
 written spec/HIV1-BENCHMARK.json
 ```
 
-### 🔴 THE BASELINE BEATS THE MODEL, AND THAT IS THE FINDING
+### For scale: what Boltz-2 itself reports
+
+Its paper gives per-target AUROC of 0.64, 0.70, 0.76, 0.78, 0.83, 0.85, 0.87,
+0.87, 0.91, 0.92 on the binary affinity benchmarks - range 0.64-0.92, median
+0.85. Both heads here fall inside that, which is the relevant comparison for a
+PORT: the ceiling is Boltz-2's own accuracy, and a port can only be judged on
+whether it reaches it.
+
+### 🔴 AND THE SIZE BASELINE STILL BEATS BOTH HEADS ON THIS SET
 
 Heavy-atom count alone ranks at **0.958 (0.916-0.990)** against `P(binder)`'s
 0.762 (0.540-0.935) and `pIC50`'s 0.873 (0.733-0.967). The actives are
@@ -399,11 +407,21 @@ peptidomimetics of 40-55 heavy atoms and the decoy median is 24, so size IS a
 ranking here - and a better one over the whole list, with an interval clear of
 both heads. `P(binder)`'s interval reaches 0.540, next to chance.
 
-So this does not demonstrate recognition of protease binders. It is consistent
-with the heads ordering ligands largely by size. The control was written into
-the benchmark from the start for exactly this reason and the ligand file's
-header warned of it before the screen ran; it would have been easy, and wrong,
-to report 0.873 on its own as a success.
+So on THIS ligand set the ordering is consistent with being driven largely by
+size, and the benchmark cannot separate recognition from size. That is a
+statement about the SET, not about Boltz-2: 91 approved drugs are not matched
+decoys, and the nine actives are peptidomimetics far larger than the median
+drug. The control was written into the benchmark before the screen ran, and the
+ligand file's header warned of it, so that 0.873 could not be read as a success
+on its own.
+
+🔴 **THE README DELIBERATELY DOES NOT CARRY THIS COMPARISON** - the owner's
+call, and a reasonable one: a size baseline on an unmatched decoy set says more
+about the decoys than about the model, and the README instead states plainly
+that the decoys are not property-matched so part of the separation is size. The
+numbers live here because removing them would destroy information, and because
+the next person to run a benchmark needs to know the control exists and what it
+showed.
 
 ### Where the model does beat size
 
