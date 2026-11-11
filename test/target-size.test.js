@@ -135,6 +135,35 @@ test("🔴 the README's crop advice carries the SAME numbers as the cropper", ()
     "the tips must say 297 is the largest length timed, not predict beyond it");
 });
 
+test("🔴 the page's disclaimer carries the same limits as the code", () => {
+  // 🔴 THE FOURTH COPY, AND THE ONE A VISITOR ACTUALLY READS. The budgets live
+  // in shared/af3/affinity/crop.js and shared/chem/affinity-limits.js; the
+  // page's disclaimer, the page's advice and the README all restate them, and
+  // a disclaimer that understates a limit is worse than none because a reader
+  // plans around it.
+  const page = readFileSync(new URL("../bench.html", import.meta.url), "utf8");
+  const limits = page.slice(page.indexOf('<details class="band limits">'),
+                            page.indexOf("</details>"));
+  assert.ok(limits.length > 800, "bench.html has no limits disclaimer");
+  const affinity = readFileSync(
+    new URL("../shared/chem/affinity-limits.js", import.meta.url), "utf8");
+  for (const name of ["MAX_HEAVY_ATOMS = 128",
+                      "TRAINING_MAX_HEAVY_ATOMS = 56"]) {
+    assert.match(affinity, new RegExp(name), `${name} moved`);
+  }
+  assert.match(limits, /128 heavy atoms/, "the hard ligand ceiling");
+  assert.match(limits, /\b56\b/, "the training ceiling");
+  assert.match(limits, new RegExp(`${AFFINITY_PROTEIN_TOKENS} of them protein`));
+  assert.match(limits, /256 tokens/);
+  assert.match(limits, /10&nbsp;&#197; of the/, "the cropper's neighbourhood");
+  // 🔴 AND IT MUST SAY WHAT THE TOOL IS NOT. A limits box that lists sizes and
+  // never says "not a clinical or safety instrument" is a spec sheet, not a
+  // disclaimer.
+  assert.match(limits, /not a clinical, diagnostic, regulatory or safety/);
+  assert.match(limits, /ranking, not a potency/,
+    "the two heads' difference is the limit most likely to be misread");
+});
+
 test("🔴 every level gives the sequence box something to print", () => {
   for (const residues of [0, 1, 99, 250, 297, 298, 1500, 5000]) {
     const advice = targetSizeAdvice(residues);

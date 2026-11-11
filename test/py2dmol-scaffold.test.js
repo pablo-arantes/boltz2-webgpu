@@ -84,15 +84,16 @@ test("🔴 every page gives py2Dmol the same viewer subtree", () => {
  */
 /**
  * 🔴 AND ONE ID IS DELIBERATELY OPTIONAL, WHICH IS NOT THE SAME AS EXEMPT.
- * `#gpu-help` is the panel bench.html gives the WebGPU diagnosis; screen.html
- * does not have it and is not going to, because the whole point of keeping that
- * page is that nothing edits it. So the rule is not "every id exists
+ * `#gpu-help` is the panel bench.html gives the WebGPU diagnosis, and
+ * `#limits-device` is the line in its disclaimer that reports this GPU's own
+ * residue ceiling; screen.html has neither and is not going to, because the
+ * whole point of keeping that page is that nothing edits it. So the rule is not "every id exists
  * everywhere" but "every id the controller reads UNGUARDED exists everywhere,
  * and an optional one is really guarded" - which this checks, rather than
  * taking the exemption on trust. A `$("gpu-help")` whose null check was ever
  * dropped would make screen.html throw on the one path it is there to survive.
  */
-const OPTIONAL_IDS = ["gpu-help"];
+const OPTIONAL_IDS = ["gpu-help", "limits-device"];
 
 test("🔴 every page supplies every id the controller reaches for", () => {
   const controller = read("web/screen.js");

@@ -578,3 +578,38 @@ footer p + p { margin-top: 0.625rem; }
   font-size: 0.9375rem;
   color: var(--quiet);
 }
+
+/* ---------- the limits disclaimer ------------------------------------ */
+
+/* 🔴 CLOSED, QUIET, AND STILL READABLE WHEN CLOSED. It sits above the inputs
+   because that is where it is useful, so it must not shout: no border, no fill,
+   no warning colour. The marker and the one-line summary are the whole of it
+   until someone asks for more. */
+.limits { color: var(--quiet); }
+.limits > summary {
+  cursor: pointer;
+  max-width: 82ch;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+}
+.limits > summary:hover { color: var(--ink); }
+.limits[open] > summary { color: var(--ink); margin-bottom: 1.25rem; }
+.limits-body { max-width: 74ch; }
+.limits-body h3 {
+  margin: 1.5rem 0 0.375rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}
+.limits-body p { line-height: 1.6; font-size: 0.9375rem; }
+.limits-body p + p { margin-top: 0.625rem; }
+.limits-body code {
+  font: 0.875rem var(--mono);
+  overflow-wrap: anywhere;
+}
+#limits-device {
+  font-size: 0.8125rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--rule);
+}

@@ -582,6 +582,41 @@ def main():
                                 "({ inner: innerWidth,"
                                 " column: document.body.clientWidth })")
         print("viewport:", metrics)
+
+        # 🔴 THE DISCLAIMER'S CEILING LINE IS WRITTEN BY THE CONTROLLER, so it
+        # is the one part of that box that can be stale or empty and nobody
+        # notice: the markup ships "Working out what this GPU can hold…" and a
+        # page whose boot path changed would leave that sentence on screen for
+        # every visitor, under a heading that promises a number.
+        limits = cdp.evaluate(ws, """(() => {
+          const box = document.querySelector('details.limits');
+          const line = document.getElementById('limits-device');
+          return box === null ? null : {
+            summary: box.querySelector('summary')?.textContent?.trim()
+              ?.slice(0, 80) ?? null,
+            open: box.open,
+            device: line?.textContent ?? null,
+          };
+        })()""")
+        if limits is None:
+            print("(this page has no limits disclaimer)")
+        else:
+            print("limits:", limits["device"])
+            if "Working out" in (limits["device"] or ""):
+                failures.append("the disclaimer still says it is working out"
+                                " the ceiling after the device answered")
+            for want in ("GiB", "residues"):
+                if want not in (limits["device"] or ""):
+                    failures.append("the disclaimer's ceiling line does not"
+                                    " name the %s (%r)" % (want, limits["device"]))
+            # 🔴 AND IT MUST BE CLOSED. It sits above the inputs, so an open
+            # box pushes the whole screen down the page for every visitor.
+            if limits["open"]:
+                failures.append("the limits disclaimer is open by default")
+            # a collapsed box whose summary says nothing is worse than none
+            if len(limits["summary"] or "") < 40:
+                failures.append("the disclaimer's summary says too little when"
+                                " closed: %r" % limits["summary"])
         body_width = metrics["column"]
         print("viewer:", viewer)
         print("chain:", cdp.evaluate(ws, """(() => {

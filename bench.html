@@ -95,6 +95,74 @@ turns on: a virtual screen IS a plate, so the plate is the page.
     -->
     <section class="band gpu-help" id="gpu-help" hidden></section>
 
+    <!--
+      🔴 A DISCLAIMER THAT IS CLOSED BUT STILL SAYS SOMETHING. A reader asked
+      for the limits to be on the page and not only in the README, and the two
+      ways to get that wrong are a wall of text in front of the inputs, which
+      nobody reads twice, and a collapsed box whose summary says "Disclaimer",
+      which tells you nothing at all. The summary carries the three numbers a
+      reader would act on; opening it gives the reasons.
+
+      🔴 AND THE CEILING IS THE DEVICE'S, FILLED IN AT RUNTIME. It is
+      sqrt(maxStorageBufferBindingSize / 512) residues and differs by a thousand
+      between the machines this page runs on, so the markup carries the
+      conservative figure and `#limits-device` is replaced once getDevice has
+      answered. See web/target-size.js.
+    -->
+    <details class="band limits">
+      <summary>What this can and cannot do: targets up to about 2,000 residues,
+        ligands up to 56 heavy atoms, and two scores that rank rather than
+        measure.</summary>
+
+      <div class="limits-body">
+        <p id="limits-device" class="measure">Working out what this GPU can
+          hold&hellip;</p>
+
+        <h3>The target</h3>
+        <p>The pair representation this model folds is
+          <code>residues&sup2; &times; 128 &times; 4</code> bytes, so one tensor
+          alone is 1.91&nbsp;GiB at 2,000 residues and the trunk needs several
+          at once. Past the ceiling above, the screen is refused before it
+          starts.</p>
+        <p><strong>Crop to the domain that holds the binding site.</strong> That
+          costs nothing in the score: Boltz-2's affinity module reads at most
+          256 tokens, at most 200 of them protein, within 10&nbsp;&#197; of the
+          ligand, so a longer target only changes the structure the score is
+          read off. Keep the whole domain rather than a shell &mdash; the crop
+          is folded from scratch with no template, so it has to fold on its own
+          &mdash; and keep both domains when the site sits between them.</p>
+
+        <h3>The molecules</h3>
+        <p>Boltz-2 refuses a ligand over <strong>128 heavy atoms</strong> and
+          warns above <strong>56</strong>, which was the largest it was trained
+          on. One connected molecule a line: a salt or co-crystal has no single
+          binder to score, so strip counter-ions first.</p>
+
+        <h3>The numbers</h3>
+        <p>P(binder) and pIC50 come from two heads trained on different data
+          with different supervision. pIC50 is an IC50-<em>like</em> value for
+          <strong>ordering</strong> molecules, trained on mixed
+          K<sub>i</sub>/K<sub>d</sub>/IC50 assays &mdash; its own authors call it
+          a measure that supports ranking, not a potency to quote. There is no
+          third, combined score and this page will not invent one.</p>
+        <p>The defaults here are below Boltz-2's own affinity settings of 5
+          recycles, 200 steps and 5 samples. Screen low to get an order, then
+          re-run the top few properly before believing any single value. A low
+          interface ipTM means the pose is a guess, and so is the affinity read
+          off it.</p>
+
+        <h3>What this is not</h3>
+        <p>A research tool, for generating hypotheses to test at the bench. It
+          is not a clinical, diagnostic, regulatory or safety instrument, and no
+          output here is evidence that a molecule is safe, effective or worth
+          giving to anything alive. The affinity path is reverse-engineered from
+          upstream rather than vendored, so it can differ from Boltz-2's own
+          numbers; <a href="https://github.com/pablo-arantes/boltz2-webgpu/blob/main/docs/MEASURED.md">docs/MEASURED.md</a>
+          records every comparison that has been made and what is still
+          open.</p>
+      </div>
+    </details>
+
     <div class="band setup">
       <section class="field">
         <div class="field-head">

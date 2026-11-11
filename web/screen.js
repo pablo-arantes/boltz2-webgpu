@@ -84,6 +84,33 @@ function targetAdvice() {
   });
 }
 
+/**
+ * Tell the disclaimer what this GPU can actually hold.
+ *
+ * 🔴 THE MARKUP CANNOT KNOW THIS. The ceiling is
+ * `sqrt(maxStorageBufferBindingSize / 512)` residues, which is 2,896 where an
+ * adapter reports 4 GiB and 2,047 where it reports 2 GiB - a thousand residues
+ * apart on machines this page runs on. A static figure would be wrong on one of
+ * them, so the markup carries the conservative one and this replaces it with
+ * the measurement. Optional, like `#gpu-help`: screen.html has neither.
+ */
+function showDeviceCeiling() {
+  const line = $("limits-device");
+  if (line === null) return;
+  const limits = state.loaded?.device?.limits;
+  const advice = targetSizeAdvice(0, {
+    bindingBytes: limits?.maxStorageBufferBindingSize,
+  });
+  const gib = (advice.ceiling ** 2 * 128 * 4) / 1024 ** 3;
+  line.textContent = limits === undefined
+    ? `Before this GPU answers, assuming a 2 GiB binding: up to about`
+      + ` ${advice.ceiling} residues.`
+    : `This GPU reports a ${(limits.maxStorageBufferBindingSize / 1024 ** 3)
+      .toFixed(2)} GiB storage binding, so one pair tensor caps the target at`
+      + ` ${advice.ceiling} residues (${gib.toFixed(2)} GiB at that length,`
+      + " and the trunk needs several at once).";
+}
+
 /** Put the target's size, and any warning about it, under the sequence box. */
 function showTargetSize() {
   const advice = targetAdvice();
@@ -774,8 +801,10 @@ async function boot() {
     say(`affinity weights ${done} MiB`);
   });
   state.loaded = { device, structure, affinity };
-  // the ceiling in the note was the conservative assumption until now
+  // the ceiling in the note and the disclaimer was the conservative assumption
+  // until this point
   showTargetSize();
+  showDeviceCeiling();
   say(`Ready. Boltz-2 ${structure.depths.pairformerBlocks} trunk blocks,`
     + ` ${affinity.tensors} affinity tensors`
     + ` (${(affinity.bytes / 1048576).toFixed(0)} MiB decoded).`
@@ -1056,4 +1085,5 @@ function wire() {
 
 wire();
 refresh();
+showDeviceCeiling();
 boot().catch((error) => say(String(error?.message ?? error), true));
