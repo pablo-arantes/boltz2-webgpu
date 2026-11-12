@@ -645,3 +645,71 @@ reason. 🔴 **AND THE FIRST FIX GUARDED THE MESSAGE INSTEAD OF THE BRANCH**, so
 the run fell into the `else` and subscripted `None` - a TypeError that killed
 the probe after it had completed the whole screen. Both arms now no-op below two
 ligands, verified at one ligand and at two.
+
+## A multimeric target works, and asking the question found a bug (2026-11-12)
+
+A reader asked how to screen against a two-chain target. The machinery takes
+it - `af3BatchFromA3m`'s own parameter is "chains joined by `:`" - and
+featurising the HIV-1 protease dimer in the page confirms the shape:
+
+| typed | tokens | asym ids | entity ids |
+| --- | --- | --- | --- |
+| `CHAIN` + ethanol | 102 | 1, 2 | 1, 2 |
+| `CHAIN:CHAIN` + ethanol | 201 | 1, 2, 3 | 1, 2 |
+
+Two asym ids for the two chains with the ligand at 3, and **two entity ids for
+three chains** - which is right for a homodimer: an entity is a unique sequence,
+an asym is a chain instance.
+
+### 🔴 AND IT MATTERS BY THREE LOG UNITS
+
+Darunavir against HIV-1 protease, 1 recycle / 12 steps, single sequence:
+
+| target | P(binder) | pIC50 | ipTM |
+| --- | --- | --- | --- |
+| 99 aa, one chain | 0.270 | 5.28 | 0.81 |
+| **99:99, the dimer** | **0.979** | **8.01** | **0.94** |
+
+Darunavir is a sub-nanomolar inhibitor, so the dimer's answer is the plausible
+one. HIV-1 protease is an obligate homodimer whose site is on the dimer axis, so
+the monomer is not merely a crop - it is a construct with no complete binding
+site. 🔴 **THE 100-DRUG BENCHMARK IN THIS FILE USED THE MONOMER.** It still
+ranked (ROC AUC 0.70), which is worth knowing in both directions: the ranking
+survived a wrong construct, and the absolute values from it were never worth
+quoting.
+
+### 🔴 THE LIGAND'S CHAIN LETTER WAS READ FROM THE WRONG COLUMN
+
+`drawScene` picks a chain letter for each ligand that the target is not using,
+and the check was
+`sequence.matchAll(/^(?:ATOM|HETATM).{15}(.)/gm)`. **`ATOM` is four characters
+and `HETATM` is six**, so after fifteen more it captures column 19 on a protein
+line and column 21 on a het one. On a real fold it returned `"O"` - the last
+letter of `PRO` - and excluded nothing.
+
+- On a **single-chain** target this was invisible: B was free anyway.
+- On a **two-chain** target the first ligand took **B, the target's own second
+  chain**, at residue 1 - exactly the merge `renumberLigand` exists to prevent.
+
+`freeChainLetters` in web/screen-scene.js reads `line[21]`, which is what the
+rest of that file already did. Three unit tests, one of which keeps the broken
+regex as a fixture asserting it returns `["O", "C"]` so the trap cannot come
+back, and a probe gate that fails if any ligand shares a chain letter with the
+target. Driven on the dimer: target `A, B`, ligands `C, D`.
+
+Two smaller faults on the same path: the residue count counted the colon
+(`199 residues` for a 198-residue dimer), and the probe's own gate did too. The
+note now reads `2 chains, 198 residues` - the chain count is there because two
+chains pasted on two LINES are silently concatenated into one, and the count is
+the only sign of it.
+
+### What is NOT wired up
+
+**An alignment search for a multi-chain target.** `generateMmseqs2Msa`
+validates its query against `/^[ARNDCQEGHILKMFPSTWYVX]+$/`, so a colon throws
+"Sequence must contain only standard amino-acid letters or X" - which reached
+the reader as "the MSA search failed (…)", reading as the page not understanding
+its own format. The paired search a complex needs is in the same file
+(`ticket/pair`, `mergeChainA3ms`, `MULTIMER_MSA_CROP`) and the fold page uses
+it; this page's single-query path does not. The page now names the limitation
+and screens as single sequence instead of failing obscurely.

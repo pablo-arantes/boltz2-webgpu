@@ -27,12 +27,12 @@ import { parseSmiles } from "../shared/chem/smiles.js";
 import { parseSmi, uniqueIds, describeSmi } from "../shared/input/smi.js";
 import { alignmentForScreen } from "../shared/input/msa-cache.js";
 import { generateMmseqs2Msa } from "../shared/input/mmseqs2-api.js";
-import { ScreenScene, scoreDomain, scoreColour, renumberLigand }
-  from "./screen-scene.js";
+import { ScreenScene, scoreDomain, scoreColour, renumberLigand,
+  freeChainLetters } from "./screen-scene.js";
 import { drawScatter, drawTable, DEFAULT_SORT, startsDescending }
   from "./screen-view.js";
 import { screenArchive, statusOf } from "./screen-export.js";
-import { targetSizeAdvice } from "./target-size.js";
+import { targetSizeAdvice, readChains } from "./target-size.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -76,11 +76,12 @@ const state = {
  * and `showTargetSize` is called again afterwards so the number sharpens.
  */
 function targetAdvice() {
-  const residues = $("sequence").value.replace(/\s+/g, "").length;
+  const { chains, residues } = readChains($("sequence").value);
   const limits = state.loaded?.device?.limits;
   return targetSizeAdvice(residues, {
     bindingBytes: limits?.maxStorageBufferBindingSize,
     measured: limits !== undefined,
+    chains,
   });
 }
 
@@ -501,17 +502,13 @@ function drawScene() {
   // leaves the others as loose spheres. See renumberLigand.
   let serial = 1 + (target.match(/^(ATOM|HETATM)/gm) ?? []).length;
   let resSeq = 1;
-  // 🔴 AND THE LETTERS SKIP THE TARGET'S OWN. A ligand handed a chain letter
-  // the target already uses lands inside that chain's residue numbering, where
-  // `resSeq` 1 is a real residue - so the viewer's residue machinery would
-  // treat the ligand and that residue as one thing. This page takes a single
-  // sequence, so in practice the target is chain A and "B" onwards was safe;
-  // reading the letters off the target rather than assuming makes it true
-  // instead of lucky.
-  const taken = new Set([...target.matchAll(/^(?:ATOM|HETATM).{15}(.)/gm)]
-    .map((match) => match[1]));
-  const letters = [..."BCDEFGHIJKLMNOPQRSTUVWXYZA"]
-    .filter((letter) => !taken.has(letter));
+  // 🔴 AND THE LETTERS SKIP THE TARGET'S OWN, which matters the moment a target
+  // has more than one chain - a multimeric target is typed as `CHAIN:CHAIN`,
+  // the fold writes A and B, and a ligand on B would land inside that chain's
+  // residue numbering. `freeChainLetters` reads them at PDB's fixed column; the
+  // regex this used to do read column 19 on every ATOM line and excluded
+  // nothing. See its header.
+  const letters = freeChainLetters(target);
   // 🔴 AND WHERE EACH LIGAND LANDED IS KEPT, because that is how the score
   // reaches the picture: nothing else connects a row in the table to atoms on
   // screen. It is the (chain, residue) PAIR rather than the letter, because a
@@ -863,7 +860,24 @@ async function screen() {
   renderQueue();
 
   let alignment = null;
-  if ($("msa").value === "mmseqs2") {
+  // 🔴 AN ALIGNMENT SEARCH FOR A MULTI-CHAIN TARGET IS NOT WIRED INTO THIS
+  // PAGE, AND IT HAS TO SAY THAT RATHER THAN LOOK BROKEN.
+  // `generateMmseqs2Msa` validates its query against
+  // /^[ARNDCQEGHILKMFPSTWYVX]+$/, so a colon makes it throw "Sequence must
+  // contain only standard amino-acid letters or X" - which arrived here as "the
+  // MSA search failed (…)" and reads, to someone who typed a perfectly correct
+  // `CHAIN:CHAIN`, as the page not understanding its own format. The paired
+  // search a complex needs exists in shared/input/mmseqs2-api.js (`ticket/pair`,
+  // mergeChainA3ms) and the fold page uses it; this page's single-query path
+  // does not, so the honest thing is to name the limitation and screen as
+  // single sequence, which is what the reader would have got anyway.
+  const chainCount = readChains(sequence).chains;
+  if ($("msa").value === "mmseqs2" && chainCount > 1) {
+    say(`an alignment search for a ${chainCount}-chain target is not wired into`
+      + " this page yet - the paired search a complex needs is a different"
+      + " request. Screening as single sequence; the fold still uses both"
+      + " chains.", true);
+  } else if ($("msa").value === "mmseqs2") {
     try {
       const found = await alignmentForScreen(sequence, {
         onStatus: say,

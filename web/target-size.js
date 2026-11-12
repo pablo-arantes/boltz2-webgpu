@@ -80,10 +80,31 @@ export const CROP_ADVICE =
   + " domains when the site sits between them.";
 
 /**
+ * The residues and chains in what was typed into the sequence box.
+ *
+ * 🔴 A COLON IS A CHAIN SEPARATOR, NOT A RESIDUE. A multimeric target is typed
+ * `CHAIN:CHAIN` - the featuriser's own convention, `af3BatchFromA3m`'s "chains
+ * joined by :" - and counting the string's length called the HIV-1 protease
+ * dimer "199 residues" when it is 198 in two chains.
+ *
+ * 🔴 AND NEWLINES ARE NOT SEPARATORS, WHICH IS THE TRAP WORTH NAMING. The page
+ * strips whitespace, so two chains pasted as two LINES become one chain of
+ * their concatenation - silently, and the fold is then of a protein that does
+ * not exist. Reporting the chain count is what makes it visible: paste two
+ * lines and the note says one chain.
+ */
+export function readChains(value) {
+  const chains = String(value ?? "").replace(/\s+/g, "").split(":")
+    .filter((chain) => chain.length > 0);
+  return { chains: chains.length,
+    residues: chains.reduce((sum, chain) => sum + chain.length, 0) };
+}
+
+/**
  * What to say about a target of this length on this device.
  *
  * @param {number} residues
- * @param {{bindingBytes?: number, measured?: boolean}} [device]
+ * @param {{bindingBytes?: number, measured?: boolean, chains?: number}} [device]
  *   `bindingBytes` is the device's `maxStorageBufferBindingSize`; `measured`
  *   says whether it came from a real adapter or is the conservative assumption
  * @returns {{level: "empty"|"ok"|"note"|"warn"|"refuse", residues: number,
@@ -98,9 +119,18 @@ export function targetSizeAdvice(residues, device = {}) {
   const common = { residues, ceiling, pair };
 
   if (residues === 0) {
-    return { ...common, level: "empty", note: "one protein chain, amino acids",
+    return { ...common, level: "empty",
+      note: "one or more protein chains, joined by a colon",
       message: "" };
   }
+
+  // 🔴 THE CHAIN COUNT GOES FIRST WHEN THERE IS MORE THAN ONE, because the
+  // commonest multimer mistake is invisible otherwise: two chains pasted on two
+  // LINES are concatenated into one, and "198 residues" with no chain count
+  // looks identical either way. A prefix rather than a second line, so every
+  // level keeps its own warning.
+  const chains = device.chains ?? 1;
+  const prefix = chains > 1 ? `${chains} chains, ` : "";
 
   if (residues > ceiling) {
     const message = `${residues} residues is past what this GPU can co-fold.`
@@ -108,7 +138,7 @@ export function targetSizeAdvice(residues, device = {}) {
       + ` this device stops at ${size(bindingBytes)} - a hard ceiling of`
       + ` ${ceiling} residues, which several tensors have to share. ${CROP_ADVICE}`;
     return { ...common, level: "refuse",
-      note: `${residues} residues — too long for this GPU (ceiling`
+      note: `${prefix}${residues} residues — too long for this GPU (ceiling`
         + ` ${ceiling}); crop to the domain around the site`,
       message };
   }
@@ -125,17 +155,18 @@ export function targetSizeAdvice(residues, device = {}) {
       + ` a ligand and a real chance of running out of memory before the`
       + ` ${ceiling}-residue ceiling. ${CROP_ADVICE}`;
     return { ...common, level: "warn",
-      note: `${residues} residues — past the ${MEASURED_TO} measured here;`
+      note: `${prefix}${residues} residues — past the ${MEASURED_TO} measured here;`
         + " expect minutes a ligand, and consider cropping to the domain",
       message };
   }
 
   if (residues > AFFINITY_PROTEIN_TOKENS) {
     return { ...common, level: "note",
-      note: `${residues} residues — the affinity head reads at most`
+      note: `${prefix}${residues} residues — the affinity head reads at most`
         + ` ${AFFINITY_PROTEIN_TOKENS} of them, round the ligand`,
       message: CROP_ADVICE };
   }
 
-  return { ...common, level: "ok", note: `${residues} residues`, message: "" };
+  return { ...common, level: "ok", note: `${prefix}${residues} residues`,
+    message: "" };
 }

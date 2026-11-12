@@ -19,7 +19,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ScreenScene, ligandChains, splitTarget, superposeRun, scoreColour,
-  scoreDomain, renumberLigand } from "../web/screen-scene.js";
+  scoreDomain, renumberLigand, freeChainLetters } from "../web/screen-scene.js";
 
 /**
  * 🔴 BUILT BY COLUMN INDEX, NOT BY CONCATENATION. The first version of this
@@ -320,4 +320,63 @@ test("🔴 two ligands in one scene get distinct serials, chains and residues", 
       }
     }
   }
+});
+
+/**
+ * 🔴 A MULTIMERIC TARGET IS TYPED `CHAIN:CHAIN`, AND THAT BROKE THE LIGAND'S
+ * CHAIN LETTER. A reader asked how to screen against a two-chain target; the
+ * featuriser takes chains joined by ":" and gives them asym ids 1, 2 with the
+ * ligand at 3, so the fold writes A, B and C. The page's own letter picker was
+ * supposed to avoid the target's letters and did not.
+ */
+test("🔴 a ligand never takes a chain letter the target is using", () => {
+  const monomer = [
+    "ATOM      1  N   PRO A   1      14.125 -11.428   3.200  1.00 89.53           N",
+    "ATOM      2  CA  PRO A   1      14.400 -10.317   4.086  1.00 89.54           C",
+  ].join("\n");
+  // one chain: B is free, which is why the broken version looked fine
+  assert.equal(freeChainLetters(monomer)[0], "B");
+  assert.ok(!freeChainLetters(monomer).includes("A"));
+
+  const dimer = [
+    monomer,
+    "ATOM      3  N   PRO B   1       4.125  -1.428  13.200  1.00 89.53           N",
+  ].join("\n");
+  // 🔴 THE CASE THAT WAS WRONG: with A and B taken, the first ligand must get C
+  assert.equal(freeChainLetters(dimer)[0], "C");
+  assert.ok(!freeChainLetters(dimer).includes("B"));
+});
+
+test("🔴 the chain is read at PDB's fixed column, not counted from the keyword", () => {
+  // 🔴 THIS IS THE BUG, AS A TEST. `ATOM` is four characters and `HETATM` is
+  // six, so one regex counting fifteen more lands on column 19 for a protein
+  // atom and 21 for a het one. On a real fold it captured "O" - the last letter
+  // of PRO - so nothing was excluded at all.
+  const atom =
+    "ATOM      1  N   PRO A   1      14.125 -11.428   3.200  1.00 89.53           N";
+  const het =
+    "HETATM  500  C1  LIG C   7       1.000   2.000   3.000  1.00 42.50           C";
+  const wrong = [...`${atom}\n${het}`.matchAll(/^(?:ATOM|HETATM).{15}(.)/gm)]
+    .map((match) => match[1]);
+  assert.deepEqual(wrong, ["O", "C"], "the trap, kept so it cannot come back");
+  // and what the fixed-column read gives
+  const free = freeChainLetters(`${atom}\n${het}`);
+  assert.ok(!free.includes("A") && !free.includes("C"));
+  assert.equal(free[0], "B");
+});
+
+test("🔴 a two-chain target keeps BOTH chains in the scene", () => {
+  // splitTarget must not mistake a second protein chain for a ligand: the test
+  // is that a chain is ENTIRELY het, which a protein chain never is.
+  const pdb = [
+    "ATOM      1  N   PRO A   1      14.125 -11.428   3.200  1.00 89.53           N",
+    "ATOM      2  N   PRO B   1       4.125  -1.428  13.200  1.00 89.53           N",
+    "HETATM    3  C1  LIG C   1       1.000   2.000   3.000  1.00 42.50           C",
+  ].join("\n");
+  assert.deepEqual(ligandChains(pdb), ["C"]);
+  const split = splitTarget(pdb);
+  assert.match(split.target, / A   1 /);
+  assert.match(split.target, / B   1 /);
+  assert.doesNotMatch(split.target, /LIG/);
+  assert.match(split.ligand, /LIG/);
 });

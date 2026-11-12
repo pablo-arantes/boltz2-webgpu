@@ -193,6 +193,37 @@ warns rather than predicts above it, and refuses above your GPU's own ceiling.
 Don't read a 2,000-residue estimate off that table in either direction; the
 memory arithmetic in [Running it](#running-it) is what rules that size out.
 
+### A target with more than one chain
+
+Join the chains with a colon — `CHAINA:CHAINB` — which is the featuriser's own
+convention (`af3BatchFromA3m` takes "chains joined by `:`"). They become
+separate chains of one complex: asym ids 1 and 2 with the ligand at 3, so the
+fold writes chains A, B and C.
+
+🔴 **Two chains on two lines are not two chains.** The box strips whitespace, so
+they are concatenated into one chain of a protein that does not exist. The note
+beside the box prints the chain count for exactly this reason — if it says
+`1 chain` when you meant two, that is what happened.
+
+**It can matter enormously.** HIV-1 protease is an obligate homodimer with its
+site on the dimer axis. The same ligand, 1 recycle / 12 steps:
+
+| target | P(binder) | pIC50 | ipTM |
+|---|---|---|---|
+| 99 aa, one chain | 0.270 | 5.28 | 0.81 |
+| **99:99, the dimer** | **0.979** | **8.01** | **0.94** |
+
+Darunavir is a sub-nanomolar inhibitor, so the dimer's answer is the plausible
+one and the monomer's is off by nearly three log units. The benchmark in this
+README used the **monomer** — it ranks, but it is not the right construct, and
+that is worth knowing before reading too much into those numbers.
+
+One limitation: **an alignment search for a multi-chain target is not wired into
+this page.** `generateMmseqs2Msa` validates a single query, so a colon is
+refused; the paired search a complex needs (`ticket/pair`, `mergeChainA3ms`)
+exists in `shared/input/mmseqs2-api.js` and the fold page uses it. A complex
+screens as single sequence and the page says so rather than failing quietly.
+
 ### Rank cheap, then measure the hits properly
 
 The defaults (3 recycles / 100 steps) are already below Boltz-2's own affinity

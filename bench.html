@@ -119,6 +119,14 @@ turns on: a virtual screen IS a plate, so the plate is the page.
           hold&hellip;</p>
 
         <h3>The target</h3>
+        <p><strong>More than one chain:</strong> join them with a colon &mdash;
+          <code>CHAINA:CHAINB</code> &mdash; and they are folded as separate
+          chains of one complex. Two chains on two <em>lines</em> are
+          <strong>not</strong> two chains: whitespace is stripped, so they
+          become one chain of their concatenation, and the note beside the box
+          reports how many chains it actually parsed. An alignment search for a
+          multi-chain target is not wired into this page yet; a complex screens
+          as single sequence, which it will say.</p>
         <p>The pair representation this model folds is
           <code>residues&sup2; &times; 128 &times; 4</code> bytes, so one tensor
           alone is 1.91&nbsp;GiB at 2,000 residues and the trunk needs several

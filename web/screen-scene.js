@@ -60,6 +60,38 @@ export function ligandChains(pdb) {
 }
 
 /**
+ * The chain letters a ligand may take, in preference order.
+ *
+ * 🔴 THE TARGET'S OWN LETTERS ARE EXCLUDED, AND READING THEM TOOK A FIXED
+ * COLUMN. A ligand handed a letter the target already uses lands inside that
+ * chain's residue numbering, where `resSeq` 1 is a real residue - so the viewer
+ * treats the ligand and that residue as one thing, and `renumberLigand`'s whole
+ * point is lost.
+ *
+ * 🔴 AND THE FIRST VERSION OF THIS READ THE WRONG COLUMN FOR EVERY PROTEIN
+ * ATOM. It was `/^(?:ATOM|HETATM).{15}(.)/`, and `ATOM` is FOUR characters
+ * where `HETATM` is SIX - so after fifteen more it captured column 19 on an
+ * ATOM line and column 21 on a HETATM one. On a real fold it returned "O", the
+ * last letter of `PRO`, and excluded nothing: a single-chain target still got
+ * its ligands on B, C, D..., so nothing looked wrong. A TWO-chain target put
+ * the first ligand on **B, the target's own second chain**. PDB is a
+ * fixed-column format and this is why the rest of this file uses `line[21]`.
+ *
+ * @param {string} pdb the target's records
+ * @returns {string[]} letters not used by the target, B-first then A last
+ */
+export function freeChainLetters(pdb) {
+  const taken = new Set();
+  for (const line of pdb.split("\n")) {
+    if (isAtom(line)) taken.add(chainOf(line));
+  }
+  // B first because A is conventionally the protein; A is kept as a last
+  // resort rather than dropped, so a target using B..Z still leaves something.
+  return [..."BCDEFGHIJKLMNOPQRSTUVWXYZA"]
+    .filter((letter) => !taken.has(letter));
+}
+
+/**
  * A structure split into the part that repeats and the part that does not.
  *
  * @param {string} pdb

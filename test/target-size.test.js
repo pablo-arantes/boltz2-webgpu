@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   targetSizeAdvice, residueCeiling, pairBytes, CROP_ADVICE, MEASURED_TO,
-  AFFINITY_PROTEIN_TOKENS, ASSUMED_BINDING_BYTES, PAIR_CHANNELS,
+  AFFINITY_PROTEIN_TOKENS, ASSUMED_BINDING_BYTES, PAIR_CHANNELS, readChains,
 } from "../web/target-size.js";
 
 const GIB = 1024 ** 3;
@@ -80,7 +80,7 @@ test("🔴 the warning says it is PAST A MEASUREMENT, not past a cliff", () => {
 test("🔴 an empty box is not a warning", () => {
   const advice = targetSizeAdvice(0);
   assert.equal(advice.level, "empty");
-  assert.equal(advice.note, "one protein chain, amino acids");
+  assert.match(advice.note, /protein chains/);
   assert.equal(advice.message, "");
 });
 
@@ -91,6 +91,30 @@ test("🔴 before a device answers, the assumption is CONSERVATIVE", () => {
   assert.equal(targetSizeAdvice(2500).level, "refuse");
   assert.equal(targetSizeAdvice(2500, { bindingBytes: 4 * GIB - 4 }).level,
                "warn", "a real 4 GiB device folds what the assumption refuses");
+});
+
+test("🔴 a colon separates chains and is not a residue", () => {
+  // 🔴 `af3BatchFromA3m`'s own convention: "chains joined by :". Counting the
+  // string's length called the HIV-1 protease dimer 199 residues.
+  const chain = "A".repeat(99);
+  assert.deepEqual(readChains(`${chain}:${chain}`),
+                   { chains: 2, residues: 198 });
+  assert.deepEqual(readChains(` ${chain} \n:\t${chain}`),
+                   { chains: 2, residues: 198 }, "whitespace is not a chain");
+  assert.deepEqual(readChains(`${chain}::${chain}`),
+                   { chains: 2, residues: 198 }, "an empty chain is not one");
+  assert.deepEqual(readChains(""), { chains: 0, residues: 0 });
+});
+
+test("🔴 TWO LINES ARE ONE CHAIN, and the note is what says so", () => {
+  // The page strips whitespace, so two chains pasted as two LINES become one
+  // chain of their concatenation - a fold of a protein that does not exist.
+  // The count cannot prevent it; printing the chain count makes it visible.
+  const chain = "A".repeat(99);
+  assert.equal(readChains(`${chain}\n${chain}`).chains, 1);
+  assert.equal(targetSizeAdvice(198, { chains: 1 }).note, "198 residues");
+  assert.equal(targetSizeAdvice(198, { chains: 2 }).note,
+               "2 chains, 198 residues");
 });
 
 test("🔴 the crop advice says cropping costs nothing in the SCORE", () => {

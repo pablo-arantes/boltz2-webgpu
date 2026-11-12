@@ -494,8 +494,20 @@ def main():
             if chosen != args.msa:
                 failures.append("the MSA dial would not take %r" % args.msa)
             print("msa dial:", chosen)
-        if "%d residues" % len(args.sequence) not in typed["sequenceNote"]:
-            failures.append("the sequence box did not report its length: %r"
+        # 🔴 A COLON IS A CHAIN SEPARATOR, NOT A RESIDUE, so the expected count
+        # is the chains' total rather than the string's length - and the note
+        # names the chain count too, which is how a reader sees that two chains
+        # pasted on two LINES became one.
+        chains = [c for c in args.sequence.replace("\n", "").split(":") if c]
+        residues = sum(len(c) for c in chains)
+        if "%d residues" % residues not in typed["sequenceNote"]:
+            failures.append("the sequence box did not report its length"
+                            " (%d residues in %d chain(s)): %r"
+                            % (residues, len(chains), typed["sequenceNote"]))
+        if len(chains) > 1 and "%d chains" % len(chains) \
+                not in typed["sequenceNote"]:
+            failures.append("the note does not say how many chains it parsed,"
+                            " which is the only sign of a two-line paste: %r"
                             % typed["sequenceNote"])
         if "%d ligand" % len(ligands) not in typed["ligandNote"]:
             failures.append("the ligand box did not parse %d ligands: %r"
@@ -709,6 +721,33 @@ def main():
                    chains: r?.chains?.length ?? -1 };
         })()""")
         print("renderer holds:", atoms)
+
+        # 🔴 NO LIGAND MAY SHARE A CHAIN LETTER WITH THE TARGET, which only
+        # bites on a MULTIMERIC target and is why it went unnoticed. A target
+        # typed `CHAIN:CHAIN` folds to chains A and B with the ligand at C; the
+        # page's letter picker read the chain at the wrong column on every ATOM
+        # line, excluded nothing, and put the first ligand on B - inside the
+        # target's second chain, at its residue 1.
+        collide = cdp.evaluate(ws, """(() => {
+          const pdb = globalThis.__scenePdb ?? '';
+          const placed = globalThis.__scenePlaced ?? [];
+          const protein = new Set();
+          for (const line of pdb.split('\\n')) {
+            if (line.startsWith('ATOM')) protein.add(line[21]);
+          }
+          return { protein: [...protein].sort(),
+                   ligands: placed.map((spot) => spot.chain),
+                   clash: placed.filter((spot) => protein.has(spot.chain))
+                     .map((spot) => `${spot.id} on ${spot.chain}`) };
+        })()""")
+        print("chains - target:", collide["protein"],
+              " ligands:", collide["ligands"][:6])
+        if collide["clash"]:
+            failures.append("ligand(s) share a chain letter with the target,"
+                            " so the viewer merges them: %s" % collide["clash"])
+        if not collide["protein"]:
+            failures.append("no protein chain in the scene at all (%s)"
+                            % collide)
         if atoms["viewers"] < 1:
             failures.append("no py2Dmol viewer was built")
         # 🔴 AND THE CANVAS FILLS THE COLUMN. py2Dmol wraps the canvas box in
