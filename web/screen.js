@@ -717,6 +717,17 @@ function showGpuHelp(advice) {
       if (typeof step.paste === "string") {
         const row = document.createElement("div");
         row.className = "gpu-paste";
+        // 🔴 WHERE IT GOES, LABELLED. Not every step is a chrome:// address any
+        // more: a Linux null adapter needs `vulkaninfo --summary` in a TERMINAL
+        // and a relaunch with command-line switches, and a reader who pastes
+        // either into the address bar gets a web search for it.
+        const where = { terminal: "terminal", launch: "relaunch" }[step.kind];
+        if (where !== undefined) {
+          const tag = document.createElement("span");
+          tag.className = "gpu-where";
+          tag.textContent = where;
+          row.append(tag);
+        }
         const code = document.createElement("code");
         code.textContent = step.paste;
         const copy = document.createElement("button");

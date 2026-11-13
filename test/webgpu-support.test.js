@@ -16,7 +16,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { webgpuAdvice, readAgent, WEBGPU_BY_DEFAULT }
+import { webgpuAdvice, readAgent, WEBGPU_BY_DEFAULT, STEP_KINDS }
   from "../web/webgpu-support.js";
 
 const UA = {
@@ -103,6 +103,68 @@ test("🔴 Firefox is not told it has WebGPU where it does not", () => {
   const windows = webgpuAdvice("missing", { userAgent: UA.firefoxWindows });
   assert.match(windows.summary, /141/,
     "Firefox shipped WebGPU on Windows in 141 and this reader is on 139");
+});
+
+test("🔴 a LINUX null adapter gets the Vulkan flag - it was in the wrong stage", () => {
+  // 🔴 THIS IS THE BUG A READER HIT. They enabled the flags, `navigator.gpu`
+  // appeared, and `requestAdapter()` returned null - and this branch offered
+  // acceleration, the GPU report and the blocklist, with no mention of Vulkan.
+  // Chrome's own troubleshooting page lists `chrome://flags/#enable-vulkan`
+  // under "When GPU adapter is null", because `#enable-unsafe-webgpu` alone
+  // exposes the API and leaves no backend to hand out an adapter. The advice
+  // had it filed under a MISSING navigator.gpu, which is the other stage.
+  const advice = webgpuAdvice("no-adapter", { userAgent: UA.chromeLinux });
+  // 🔴 AND THE SUMMARY NAMES VULKAN, not acceleration and the blocklist. That
+  // sentence was platform-blind, so the reader checked both and was no further
+  // forward; the right step being further down a list does not help if the
+  // first sentence sends you elsewhere.
+  assert.match(advice.summary, /Vulkan/);
+  assert.match(advice.summary, /no adapter to hand out|no hardware Vulkan/);
+  assert.ok(pastes(advice).includes("chrome://flags/#enable-vulkan"),
+    "a Linux null adapter without #enable-vulkan is the commonest Linux case"
+    + " left unaddressed");
+  assert.ok(pastes(advice).includes("chrome://flags/#enable-unsafe-webgpu"));
+  // 🔴 AND THE QUESTION THE PAGE CANNOT ANSWER: does the machine have a
+  // hardware Vulkan driver at all? If not, no flag helps.
+  assert.ok(pastes(advice).includes("vulkaninfo --summary"));
+  const vulkaninfo = advice.steps
+    .find((step) => step.paste === "vulkaninfo --summary");
+  assert.equal(vulkaninfo.kind, "terminal",
+    "a terminal command pasted into the address bar is a web search");
+  assert.match(vulkaninfo.do, /llvmpipe|lavapipe/,
+    "software rendering is the answer this check exists to catch");
+  // and the documented fallback launch, X11 rather than Wayland
+  const launch = advice.steps.find((step) => step.kind === "launch");
+  assert.match(launch.paste, /--ozone-platform=x11/);
+  assert.match(launch.paste, /--enable-features=Vulkan/,
+    "the command-line switch is --enable-features=Vulkan, not --enable-vulkan");
+  assert.match(launch.paste, /--user-data-dir=/,
+    "a throwaway profile, so it does not disturb the browser they use");
+});
+
+test("🔴 a WINDOWS null adapter is not sent to Linux's Vulkan steps", () => {
+  const advice = webgpuAdvice("no-adapter", { userAgent: UA.chromeWindows });
+  assert.doesNotMatch(advice.summary, /Vulkan/,
+    "Vulkan is the Linux explanation; on Windows it is acceleration or the"
+    + " blocklist");
+  assert.match(advice.summary, /acceleration|blocklist/);
+  assert.ok(!pastes(advice).includes("chrome://flags/#enable-vulkan"));
+  assert.ok(!pastes(advice).includes("vulkaninfo --summary"));
+  assert.ok(advice.steps.every((step) => step.kind === "address"),
+    "every Windows step is an address, so none should be labelled otherwise");
+});
+
+test("🔴 every step declares where it is carried out", () => {
+  for (const stage of ["missing", "no-adapter", "device-failed"]) {
+    for (const [name, ua] of Object.entries(UA)) {
+      for (const step of webgpuAdvice(stage, { userAgent: ua }).steps) {
+        assert.ok(STEP_KINDS.includes(step.kind),
+          `${stage}/${name}: step kind ${JSON.stringify(step.kind)} is not one`
+          + ` of ${STEP_KINDS.join(", ")}`);
+        if (step.paste === undefined) assert.equal(step.kind, "none");
+      }
+    }
+  }
 });
 
 test("🔴 the three stages are three different diagnoses", () => {

@@ -60,7 +60,16 @@ export const WEBGPU_BY_DEFAULT = [
   { browser: "Safari", where: "macOS 26, iOS 26, iPadOS 26", from: "26" },
 ];
 
+/**
+ * 🔴 WHERE A STEP IS CARRIED OUT, BECAUSE THEY ARE NOT ALL THE ADDRESS BAR.
+ * A Linux null adapter needs `vulkaninfo --summary` in a TERMINAL and a
+ * relaunch with command-line switches, and a reader who pastes either into the
+ * address bar gets a search for it. Every step declares one; the UI labels it.
+ */
+export const STEP_KINDS = ["address", "terminal", "launch", "none"];
+
 const CHECK_GPU = {
+  kind: "address",
   do: "Open Chrome's own GPU report and read the WebGPU row and"
     + " “Problems Detected”. It says what Chrome thinks of this"
     + " machine, which is the fastest way to tell a missing flag from a"
@@ -69,6 +78,7 @@ const CHECK_GPU = {
 };
 
 const ACCELERATION = {
+  kind: "address",
   do: "Turn on “Use graphics acceleration when available”, then"
     + " relaunch. With it off, Chrome renders in software and will not hand a"
     + " page a GPU.",
@@ -76,26 +86,74 @@ const ACCELERATION = {
 };
 
 const UNSAFE_WEBGPU = {
+  kind: "address",
   do: "Set “Unsafe WebGPU Support” to Enabled and relaunch.",
   paste: "chrome://flags/#enable-unsafe-webgpu",
 };
 
 const VULKAN = {
+  kind: "address",
   do: "Set “Vulkan” to Enabled as well - on Linux, Chrome's WebGPU"
     + " runs on Vulkan - then relaunch.",
   paste: "chrome://flags/#enable-vulkan",
 };
 
 const BLOCKLIST = {
+  kind: "address",
   do: "If the GPU report says your driver is blocklisted, this overrides it."
     + " It is a real risk on an old driver: update the driver first if you can.",
   paste: "chrome://flags/#ignore-gpu-blocklist",
 };
 
 const HIGH_PERFORMANCE = {
+  kind: "address",
   do: "On a laptop with two GPUs, this stops Chrome picking the integrated one"
     + " and finding it unusable.",
   paste: "chrome://flags/#force-high-performance-gpu",
+};
+
+/**
+ * 🔴 DOES THE MACHINE HAVE VULKAN AT ALL? On Linux this is the first question
+ * and the page cannot answer it: Chrome's WebGPU runs on Vulkan there, so a
+ * system with no Vulkan driver installed hands out no adapter however many
+ * flags are set. It is also the one check that distinguishes "Chrome refused
+ * the GPU" from "there is no hardware Vulkan on this box" - if the summary
+ * lists only `llvmpipe` or `lavapipe`, that is software rendering and WebGPU
+ * will stay refused.
+ */
+const VULKANINFO = {
+  kind: "terminal",
+  do: "In a terminal, check the system has a hardware Vulkan driver. On"
+    + " Debian or Ubuntu, install it first with"
+    + " \u201csudo apt install mesa-vulkan-drivers vulkan-tools\u201d. If the"
+    + " summary lists only llvmpipe or lavapipe, that is software rendering and"
+    + " no flag will help - the GPU's own driver is what is missing.",
+  paste: "vulkaninfo --summary",
+};
+
+/**
+ * 🔴 THE DOCUMENTED LINUX FALLBACK, IN A THROWAWAY PROFILE. The gpuweb
+ * implementation-status wiki gives this exact launch for Linux configurations
+ * the default build will not serve, and `--ozone-platform=x11` is in it for a
+ * reason: Chromium reports "'--ozone-platform=wayland' is not compatible with
+ * Vulkan", which has been seen on machines where `vulkaninfo` finds the GPU
+ * perfectly well. The separate profile means a reader can try it without
+ * changing the browser they use for everything else.
+ *
+ * 🔴 AND THE COMMAND-LINE SWITCH IS `--enable-features=Vulkan`, NOT
+ * `--enable-vulkan`. The latter is the name of the entry on the flags page and
+ * does nothing on a command line.
+ */
+const LINUX_FALLBACK = {
+  kind: "launch",
+  do: "If the flags above did not do it, try this launch in a separate,"
+    + " throwaway profile - it is the fallback the WebGPU implementation-status"
+    + " wiki documents for Linux. X11 rather than Wayland is deliberate:"
+    + " Chromium refuses Vulkan under Wayland on some setups and says so in its"
+    + " own log.",
+  paste: "google-chrome --user-data-dir=/tmp/chrome-webgpu"
+    + " --enable-unsafe-webgpu --ozone-platform=x11 --use-angle=vulkan"
+    + " --enable-features=Vulkan,VulkanFromANGLE",
 };
 
 /**
@@ -171,6 +229,7 @@ export function webgpuAdvice(stage, env = {}) {
         + " whatever its version. Serve the page over https://, or over"
         + " http://localhost, which counts as secure.",
       steps: [{
+        kind: "address",
         do: "If you must use a LAN address, Chrome can be told to treat one as"
           + " secure: add the origin to this flag's list and relaunch.",
         paste: "chrome://flags/#unsafely-treat-insecure-origin-as-secure",
@@ -195,15 +254,40 @@ export function webgpuAdvice(stage, env = {}) {
   }
 
   if (stage === "no-adapter") {
+    // 🔴 AND THE LIKELIEST CAUSE IS NOT THE SAME ON LINUX. This sentence named
+    // graphics acceleration and the blocklist on every platform, and a reader
+    // on Linux read it, checked both, and was no further forward: there,
+    // WebGPU runs on Vulkan, and the usual reason for a null adapter is that
+    // there is no Vulkan backend behind the API - either the flag is off or the
+    // machine has no hardware Vulkan driver. Naming the wrong cause first
+    // sends someone to the wrong place even when the right step is further
+    // down the list.
+    const why = os === "Linux"
+      ? "On Linux that is usually Vulkan: Chrome's WebGPU runs on it, and"
+        + " turning WebGPU on without a Vulkan backend behind it gives exactly"
+        + " this - the API present, no adapter to hand out. Either the Vulkan"
+        + " flag is off, or the machine has no hardware Vulkan driver"
+        + " installed. The check below answers which, and the flags above are"
+        + " the fix for the first."
+      : "That is almost always graphics acceleration being switched off, or a"
+        + " graphics driver on Chrome's blocklist - not a missing GPU.";
     return {
       summary: "This browser has WebGPU, but it could not give this page a GPU"
-        + " adapter. That is almost always graphics acceleration being switched"
-        + " off, or a graphics driver on Chrome's blocklist - not a missing"
-        + " GPU.",
+        + ` adapter. ${why}`,
+      // 🔴 THE LINUX STEPS WERE FILED UNDER THE WRONG STAGE, and a reader hit
+      // exactly this. Chrome's own troubleshooting page lists
+      // `chrome://flags/#enable-vulkan` under "When GPU adapter is null" - not
+      // under a missing `navigator.gpu` - because `#enable-unsafe-webgpu` alone
+      // exposes the API while leaving no backend to hand out an adapter. This
+      // branch offered acceleration, the GPU report and the blocklist, so the
+      // one flag that fixes the commonest Linux case was in the other branch.
       steps: isChromium(browser)
-        ? [ACCELERATION, CHECK_GPU, BLOCKLIST,
-          ...(os === "Windows" ? [HIGH_PERFORMANCE] : [])]
+        ? [...(os === "Linux" ? [UNSAFE_WEBGPU, VULKAN] : []),
+          ACCELERATION, CHECK_GPU, BLOCKLIST,
+          ...(os === "Windows" ? [HIGH_PERFORMANCE] : []),
+          ...(os === "Linux" ? [VULKANINFO, LINUX_FALLBACK] : [])]
         : [{
+          kind: "none",
           do: "Check that hardware acceleration is on in your browser's"
             + " settings and that your graphics driver is current, then"
             + " relaunch.",
@@ -262,6 +346,7 @@ export function webgpuAdvice(stage, env = {}) {
       summary: `${where} Current Chrome is the surest route on this platform;`
         + " in Firefox you can try the switch below, which is experimental.",
       steps: [{
+        kind: "address",
         do: "Open Firefox's configuration editor, search for"
           + " dom.webgpu.enabled and set it to true, then restart. On Linux you"
           + " may also need gfx.webgpu.force-enabled.",
@@ -278,6 +363,8 @@ export function webgpuAdvice(stage, env = {}) {
         + `${version === null || version >= 26 ? "" : ` This is Safari ${version}.`}`
         + " On an older Safari it is behind a feature flag.",
       steps: [{
+        // a menu path, with nothing to paste - see STEP_KINDS
+        kind: "none",
         do: "In Safari, open Settings › Advanced and turn on “Show"
           + " features for web developers”, then Develop › Feature"
           + " Flags and tick WebGPU.",

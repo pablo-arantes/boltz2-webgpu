@@ -563,6 +563,19 @@ footer p + p { margin-top: 0.625rem; }
   flex-wrap: wrap;
   margin-bottom: 0.35rem;
 }
+/* 🔴 A STEP THAT IS NOT AN ADDRESS SAYS SO. Everything in this panel used to
+   be a chrome:// address; a Linux null adapter needs a terminal command and a
+   relaunch, and pasting either into the address bar searches the web for it. */
+.gpu-where {
+  font: 0.6875rem/1 var(--sans);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  color: var(--surface);
+  background: var(--quiet);
+  border-radius: 2px;
+  padding: 0.2rem 0.35rem;
+}
+
 .gpu-paste code {
   font: 0.8125rem/1.6 var(--mono);
   background: var(--surface);

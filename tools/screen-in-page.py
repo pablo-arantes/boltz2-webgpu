@@ -44,6 +44,20 @@ PORT = fold_in_page.PORT
 DEFAULT_SEQUENCE = "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQ"
 
 
+# 🔴 THE API PRESENT AND THE ADAPTER EMPTY: the stage a reader reached once the
+# flags were on. `requestAdapter` resolving to null is what Chrome does when
+# acceleration is off, the driver is blocklisted, or - on Linux - there is no
+# Vulkan backend for WebGPU to sit on.
+EMPTY_ADAPTER = """
+  try {
+    Object.defineProperty(navigator, 'gpu', {
+      configurable: true,
+      get: () => ({ requestAdapter: async () => null,
+                    getPreferredCanvasFormat: () => 'bgra8unorm' }),
+    });
+  } catch {}
+"""
+
 HIDE_WEBGPU = """
   try {
     Object.defineProperty(navigator, 'gpu',
@@ -107,6 +121,8 @@ PROBE_DIAGNOSIS = """(() => {
                   .map((code) => code.textContent),
                 links: (panel?.querySelectorAll('a[href^="chrome:"]') ?? [])
                   .length,
+                wheres: [...(panel?.querySelectorAll('.gpu-where') ?? [])]
+                  .map((tag) => tag.textContent),
                 runDisabled: document.getElementById('run').disabled,
               };
             })()"""
@@ -192,6 +208,14 @@ def main():
     ap.add_argument("--no-webgpu", action="store_true",
                     help="hide navigator.gpu and check the diagnosis instead"
                          " of running a screen")
+    # 🔴 THE SECOND STAGE, WHICH IS WHERE A READER ACTUALLY ENDED UP. They
+    # enabled the flags, `navigator.gpu` appeared, and `requestAdapter()`
+    # returned null - a different failure with different fixes, and the one
+    # whose Linux branch was missing the Vulkan flag entirely. Hiding the API
+    # cannot reach it; this keeps the API and empties the adapter.
+    ap.add_argument("--no-adapter", action="store_true",
+                    help="keep navigator.gpu but return no adapter, and check"
+                         " that diagnosis")
     # 🔴 AND THE LINUX BRANCH IS THE ONE THAT ACTUALLY BIT A READER, so it gets
     # driven rather than only unit-tested. Chrome on Linux below 144 exposes no
     # WebGPU at all, and 144 only covers Intel Gen12+ - that is the case this
@@ -261,6 +285,9 @@ def main():
             # than as something that was there and went away
             ws.call("Page.addScriptToEvaluateOnNewDocument",
                     source=HIDE_WEBGPU)
+        if args.no_adapter:
+            ws.call("Page.addScriptToEvaluateOnNewDocument",
+                    source=EMPTY_ADAPTER)
         if args.as_ua:
             ws.call("Emulation.setUserAgentOverride",
                     userAgent=FAKE_AGENTS[args.as_ua])
@@ -355,7 +382,7 @@ def main():
             report(failures)
             return
 
-        if args.no_webgpu:
+        if args.no_webgpu or args.no_adapter:
             cdp.wait_for(ws, "globalThis.__gpuAdvice !== undefined",
                          timeout=60, what="the WebGPU diagnosis",
                          progress="document.getElementById('screen-status')"
@@ -386,15 +413,34 @@ def main():
             if args.as_ua == "linux":
                 if "Linux" not in shown["diagnostics"]:
                     failures.append("the UA override did not reach the page")
+                # 🔴 BOTH STAGES NEED THE VULKAN FLAG ON LINUX, which is the
+                # correction this arm exists for: Chrome's troubleshooting page
+                # lists it under "GPU adapter is null", and this advice had it
+                # only under a missing navigator.gpu.
                 for want in ("chrome://flags/#enable-unsafe-webgpu",
                              "chrome://flags/#enable-vulkan"):
                     if want not in shown["pastes"]:
                         failures.append("a Linux reader is not told about %s"
                                         % want)
-                if "144" not in shown["summary"]:
+                if args.no_adapter:
+                    # the question the page cannot answer for them
+                    if "vulkaninfo --summary" not in shown["pastes"]:
+                        failures.append("a Linux null adapter is not told to"
+                                        " check for a Vulkan driver")
+                    if not any("ozone-platform=x11" in paste
+                               for paste in shown["pastes"]):
+                        failures.append("the documented Linux fallback launch"
+                                        " is missing")
+                    if "terminal" not in (shown["wheres"] or []):
+                        failures.append("a terminal command is not labelled as"
+                                        " one, so it reads as an address")
+                elif "144" not in shown["summary"]:
                     failures.append("the Linux diagnosis does not say which"
                                     " Chrome version turns WebGPU on")
             if args.as_ua == "windows":
+                if "vulkaninfo --summary" in shown["pastes"]:
+                    failures.append("a Windows reader is told to run"
+                                    " vulkaninfo")
                 if "chrome://flags/#enable-vulkan" in shown["pastes"]:
                     failures.append("a Windows reader is sent to the Linux"
                                     " Vulkan flag")

@@ -115,6 +115,16 @@ python3 tools/serve.py        # any static server will do; the page is static
   graphics acceleration when available" off in `chrome://settings/system`,
   Chrome renders in software and offers no WebGPU at all.
 
+  🔴 **On Linux, "has WebGPU but no GPU adapter" is a different problem from
+  "no WebGPU".** `#enable-unsafe-webgpu` exposes the API; without
+  `#enable-vulkan` behind it there is no backend to hand out an adapter, so you
+  get the API and nothing to run on. If both flags are on and it still fails,
+  check the machine has a hardware Vulkan driver at all — `vulkaninfo
+  --summary` in a terminal, after `sudo apt install mesa-vulkan-drivers
+  vulkan-tools` on Debian or Ubuntu. A summary listing only `llvmpipe` or
+  `lavapipe` is software rendering, and no browser flag fixes a missing driver.
+  The page prints these steps itself, labelled by where each one goes.
+
   If the page says it got no GPU, it now works out which of those cases you are
   in and prints the steps, with a diagnostics line to paste into an issue.
 

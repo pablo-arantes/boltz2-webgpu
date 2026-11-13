@@ -713,3 +713,49 @@ its own format. The paired search a complex needs is in the same file
 (`ticket/pair`, `mergeChainA3ms`, `MULTIMER_MSA_CROP`) and the fold page uses
 it; this page's single-query path does not. The page now names the limitation
 and screens as single sequence instead of failing obscurely.
+
+## The Linux reader got to the SECOND stage, and its advice was wrong (2026-11-13)
+
+Good news first: after the previous change, the reader on Linux no longer sees
+"This browser has no WebGPU". They see the next stage - `navigator.gpu` present,
+`requestAdapter()` returning **null** - which means the flags worked and the API
+is there.
+
+🔴 **AND THAT BRANCH HAD THE LINUX STEPS FILED UNDER THE WRONG STAGE.** The
+`no-adapter` advice offered graphics acceleration, `chrome://gpu` and the
+blocklist override on every platform. Chrome's own troubleshooting page lists
+`chrome://flags/#enable-vulkan` under **"When GPU adapter is null"**, not under a
+missing `navigator.gpu` - and the reason is the mechanism:
+`#enable-unsafe-webgpu` alone exposes the API while leaving no Vulkan backend to
+hand out an adapter, which is exactly the state a reader reaches after setting
+one flag and not the other. The advice had it in the other branch, so the
+commonest Linux case was the one case it did not address.
+
+🔴 **AND THE SUMMARY NAMED THE WRONG CAUSE FIRST.** "That is almost always
+graphics acceleration being switched off, or a graphics driver on Chrome's
+blocklist" is true on Windows and misleading on Linux, where WebGPU runs on
+Vulkan. A reader checks the first thing a sentence names; the right step being
+fifth in a list does not help. The Linux summary now names Vulkan and says what
+the null adapter means.
+
+Three steps were added for a Linux null adapter, all sourced:
+
+| step | where | why |
+| --- | --- | --- |
+| `chrome://flags/#enable-vulkan` | address bar | Chrome's troubleshooting page, under the null-adapter heading |
+| `vulkaninfo --summary` | **terminal** | the question the page cannot answer: is there a hardware Vulkan driver at all? `mesa-vulkan-drivers vulkan-tools` installs it; a summary listing only `llvmpipe`/`lavapipe` is software rendering and no flag will help |
+| `google-chrome --user-data-dir=… --enable-unsafe-webgpu --ozone-platform=x11 --use-angle=vulkan --enable-features=Vulkan,VulkanFromANGLE` | **relaunch** | the fallback the gpuweb implementation-status wiki documents for Linux. X11 is deliberate: Chromium reports "'--ozone-platform=wayland' is not compatible with Vulkan". The command-line switch is `--enable-features=Vulkan`; `--enable-vulkan` is only the flags-page entry name |
+
+🔴 **AND NOT EVERY STEP IS AN ADDRESS ANY MORE**, so each one declares where it
+is carried out (`STEP_KINDS`) and the panel labels the two that are not:
+a reader pasting `vulkaninfo --summary` into the address bar gets a web search
+for it.
+
+### Driven, in the state the reader was in
+
+`--no-webgpu` hides `navigator.gpu` and cannot reach this stage at all.
+`tools/screen-in-page.py --no-adapter` keeps the API and returns a null adapter,
+which is what their machine does, and `--as-ua=linux|windows` picks the branch.
+`npm run test:no-adapter`: the Linux arm requires both flags, `vulkaninfo`, the
+X11 fallback launch and a `terminal` label; the Windows arm requires that none
+of them appear and that its summary still names acceleration and the blocklist.
