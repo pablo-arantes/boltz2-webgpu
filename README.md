@@ -125,6 +125,23 @@ python3 tools/serve.py        # any static server will do; the page is static
   `lavapipe` is software rendering, and no browser flag fixes a missing driver.
   The page prints these steps itself, labelled by where each one goes.
 
+  🔴 **Firefox on Linux is a different answer.** `dom.webgpu.enabled` defaults
+  to true only on Windows and on Apple-silicon macOS — everywhere else it is
+  `@IS_NIGHTLY_BUILD@`, so on Linux a Release or Beta build has it **off** and
+  Nightly has it on (checked against Mozilla's own
+  `modules/libpref/init/StaticPrefList.yaml`). In `about:config`,
+  `dom.webgpu.enabled` is the one pref that turns the API on, `about:support` is
+  Firefox's graphics report, and `gfx.webgpu.ignore-blocklist` is its blocklist
+  override. There is **no** `gfx.webgpu.force-enabled` — that pref appears in
+  third-party guides and does not exist.
+
+  **Do not force it on a Linux ESR build.** Mozilla state that ESR 153 does not
+  support WebGPU on Linux and that Linux-specific WebGPU security fixes are not
+  being backported to it ([bugzilla
+  2063383](https://bugzilla.mozilla.org/show_bug.cgi?id=2063383)), so the pref
+  would enable code that is not being patched. Use a current Firefox, or
+  Chrome.
+
   If the page says it got no GPU, it now works out which of those cases you are
   in and prints the steps, with a diagnostics line to paste into an issue.
 

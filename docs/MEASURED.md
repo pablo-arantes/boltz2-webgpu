@@ -759,3 +759,54 @@ which is what their machine does, and `--as-ua=linux|windows` picks the branch.
 `npm run test:no-adapter`: the Linux arm requires both flags, `vulkaninfo`, the
 X11 fallback launch and a `terminal` label; the Windows arm requires that none
 of them appear and that its summary still names acceleration and the blocklist.
+
+## Firefox: the advice named a pref that does not exist (2026-11-13)
+
+Asked what a reader on Firefox should do, and the answer turned up a worse
+fault than the Chrome one: **this advice told a Linux Firefox user to set
+`gfx.webgpu.force-enabled`, which is not a real preference.** It appears in
+third-party guides; `grep force-enabled` over Mozilla's own
+`modules/libpref/init/StaticPrefList.yaml` finds twenty-one preferences and none
+of them is that one. 🔴 **A pref that does nothing is worse than no
+instruction, because the reader believes they have tried it.**
+
+What that file actually defines, read on 2026-11-13:
+
+| pref | value | meaning here |
+| --- | --- | --- |
+| `dom.webgpu.enabled` | `true` on `XP_WIN`, or `XP_MACOSX && MOZ_AARCH64`; else `@IS_NIGHTLY_BUILD@` | on **Linux** it is on in Nightly and **off in Release and Beta**; on an **Intel Mac** it is off |
+| `gfx.webgpu.ignore-blocklist` | `bool`, default `false` | the real blocklist override - Chrome's `#ignore-gpu-blocklist` by another name |
+| `dom.webgpu.wgpu-backend` | comma list, `"vulkan"` among the names | why the Vulkan-driver check applies to Firefox on Linux as much as to Chrome |
+
+That pref's own condition is the primary source for the support table in
+web/webgpu-support.js: Windows and Apple-silicon macOS by default, everything
+else Nightly.
+
+### 🔴 AND A LINUX ESR IS THE ONE CASE WHERE "FLIP THE PREF" IS BAD ADVICE
+
+Mozilla's Andy Leiserson, on
+[bugzilla 2063383](https://bugzilla.mozilla.org/show_bug.cgi?id=2063383): "ESR
+153 does not officially support WebGPU on Linux", and they "do not plan to
+backport Linux-specific WebGPU security fixes to ESR153". The pref can still be
+flipped, which is exactly why it has to be said - a reader following generic
+instructions would turn on code that is not being patched for them. Both Firefox
+branches carry that caution on Linux, and neither carries it on Windows, where
+it would be noise.
+
+### Two more faults the question exposed
+
+**Firefox was given Chrome's controls.** The null-adapter branch had one generic
+sentence for every non-Chromium browser - "check that hardware acceleration is
+on" - while its summary named *"a graphics driver on Chrome's blocklist"* to a
+Firefox reader. Firefox's graphics report is `about:support`, not
+`chrome://gpu`, and a test now asserts that no `chrome://` address ever reaches
+a Firefox reader and that its summary never mentions Chrome.
+
+**And its Linux null adapter needed the Vulkan check too**, since
+`dom.webgpu.wgpu-backend` lists `vulkan` - the same `vulkaninfo --summary`
+question as Chrome, for the same reason.
+
+Driven at both stages: `npm run test:firefox` runs `--no-webgpu` and
+`--no-adapter` with `--as-ua=firefox-linux`, asserting Firefox's own controls,
+no `chrome://` address, no non-existent pref, and the ESR caution. 18 unit tests
+now cover the stage/platform/browser matrix.

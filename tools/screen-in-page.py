@@ -73,6 +73,11 @@ FAKE_AGENTS = {
              " Gecko) Chrome/143.0.0.0 Safari/537.36",
     "windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
                " (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+    # 🔴 A LINUX FIREFOX IS A THIRD BRANCH, not a variant of the Chrome one:
+    # different controls (about:config, about:support), a different blocklist
+    # pref, and an ESR caution that has no Chrome equivalent.
+    "firefox-linux": "Mozilla/5.0 (X11; Linux x86_64; rv:141.0) Gecko/20100101"
+                     " Firefox/141.0",
 }
 
 CEILING = """(async () => {
@@ -116,7 +121,7 @@ PROBE_DIAGNOSIS = """(() => {
                 bad: status.classList.contains('bad'),
                 hidden: panel === null ? null : panel.hidden,
                 steps: [...(panel?.querySelectorAll('.gpu-steps li') ?? [])]
-                  .map((li) => li.textContent.trim().slice(0, 56)),
+                  .map((li) => li.textContent.trim()),
                 pastes: [...(panel?.querySelectorAll('.gpu-paste code') ?? [])]
                   .map((code) => code.textContent),
                 links: (panel?.querySelectorAll('a[href^="chrome:"]') ?? [])
@@ -222,7 +227,8 @@ def main():
     # whole panel was written for, and it cannot be reproduced on this machine
     # except by telling the page it is somewhere else. The override changes the
     # UA string only; the advice is a pure function of it.
-    ap.add_argument("--as-ua", default=None, choices=["linux", "windows"],
+    ap.add_argument("--as-ua", default=None,
+                    choices=["linux", "windows", "firefox-linux"],
                     help="report a different platform's user agent, to drive"
                          " that platform's diagnosis")
     # 🔴 AND THE LENGTH REFUSAL, WHICH IS THE OTHER PATH A READER FOUND BY
@@ -392,7 +398,7 @@ def main():
             print("diagnostics:", shown["diagnostics"])
             print("pastes:", shown["pastes"])
             for step in shown["steps"]:
-                print("  step:", step)
+                print("  step:", step[:72])
             if not shown["bad"]:
                 failures.append("the status line does not read as an error")
             # 🔴 THE OLD SENTENCE, NOT THE WORDS "no WebGPU". The first
@@ -437,6 +443,28 @@ def main():
                 elif "144" not in shown["summary"]:
                     failures.append("the Linux diagnosis does not say which"
                                     " Chrome version turns WebGPU on")
+            if args.as_ua == "firefox-linux":
+                if "Firefox 141 on Linux" not in shown["diagnostics"]:
+                    failures.append("the UA override did not reach the page")
+                # 🔴 FIREFOX'S OWN CONTROLS, AND NONE OF CHROME'S. A reader
+                # given chrome:// addresses in Firefox has been handed pages
+                # that browser does not have.
+                for paste in shown["pastes"]:
+                    if paste.startswith("chrome://"):
+                        failures.append("a Firefox reader is given %s" % paste)
+                if "about:support" not in shown["pastes"]:
+                    failures.append("a Firefox reader is not sent to its own"
+                                    " graphics report")
+                # 🔴 AND NO PREF THAT DOES NOT EXIST. gfx.webgpu.force-enabled
+                # was in this advice and is in no Mozilla pref list.
+                joined = " ".join(shown["steps"]) + " " + shown["summary"]
+                if "force-enabled" in joined:
+                    failures.append("the advice names a pref that does not"
+                                    " exist (force-enabled)")
+                if "ESR" not in joined:
+                    failures.append("a Linux Firefox reader is not warned off"
+                                    " forcing WebGPU on an ESR build")
+
             if args.as_ua == "windows":
                 if "vulkaninfo --summary" in shown["pastes"]:
                     failures.append("a Windows reader is told to run"

@@ -96,6 +96,65 @@ test("🔴 an out-of-date Chrome is told to update, and nothing else", () => {
     "a flag cannot add WebGPU to a browser that does not have it");
 });
 
+test("🔴 NO ADVICE EVER NAMES A PREF THAT DOES NOT EXIST", () => {
+  // 🔴 `gfx.webgpu.force-enabled` WAS IN THIS ADVICE AND IS NOT A REAL PREF.
+  // It appears in third-party guides; `grep force-enabled` over Mozilla's own
+  // modules/libpref/init/StaticPrefList.yaml finds twenty-one prefs and none of
+  // them is that one (checked 2026-11-13). Telling a reader to create a pref
+  // that does nothing is worse than silence: they will believe they tried it.
+  const every = [];
+  for (const stage of ["missing", "no-adapter", "device-failed"]) {
+    for (const ua of Object.values(UA)) {
+      const advice = webgpuAdvice(stage, { userAgent: ua });
+      every.push(advice.summary, ...advice.steps.map((step) => step.do),
+        ...pastes(advice));
+    }
+  }
+  const text = every.join("\n");
+  assert.doesNotMatch(text, /gfx\.webgpu\.force-enabled/,
+    "that pref does not exist in StaticPrefList.yaml");
+  assert.doesNotMatch(text, /force-enabled/,
+    "no WebGPU force-enabled pref exists at all");
+  // the two that DO exist, each verified in that file
+  assert.match(text, /dom\.webgpu\.enabled/);
+  assert.match(text, /gfx\.webgpu\.ignore-blocklist/);
+});
+
+test("🔴 a LINUX Firefox is warned off forcing it on an ESR build", () => {
+  // 🔴 THE ONE CASE WHERE "JUST FLIP THE PREF" IS BAD ADVICE. Mozilla's Andy
+  // Leiserson, bugzilla 2063383: "ESR 153 does not officially support WebGPU on
+  // Linux", and they "do not plan to backport Linux-specific WebGPU security
+  // fixes to ESR153". The pref can still be flipped, which is why it has to be
+  // said.
+  for (const stage of ["missing", "no-adapter"]) {
+    const advice = webgpuAdvice(stage, { userAgent: UA.firefoxLinux });
+    const esr = advice.steps.find((step) => /ESR/.test(step.do));
+    assert.ok(esr !== undefined,
+      `no ESR caution for a Linux Firefox at the ${stage} stage`);
+    assert.match(esr.do, /not being backported|security fixes/);
+    assert.equal(esr.kind, "none", "there is nothing to paste in a caution");
+  }
+  // ...and not on Windows, where it is supported and the warning is noise
+  const windows = webgpuAdvice("missing", { userAgent: UA.firefoxWindows });
+  assert.ok(!windows.steps.some((step) => /ESR/.test(step.do)));
+});
+
+test("🔴 a Firefox reader is sent to Firefox's own controls, not Chrome's", () => {
+  for (const stage of ["missing", "no-adapter"]) {
+    const advice = webgpuAdvice(stage, { userAgent: UA.firefoxLinux });
+    assert.ok(pastes(advice).includes("about:support"),
+      "about:support is Firefox's graphics report; chrome://gpu is not it");
+    for (const paste of pastes(advice)) {
+      assert.ok(!paste.startsWith("chrome://"),
+        `a Firefox reader is given ${paste}, which Firefox has no page for`);
+    }
+  }
+  // 🔴 AND ITS null-adapter SUMMARY MUST NOT BLAME CHROME'S BLOCKLIST, which
+  // is what it did: the sentence named "Chrome's blocklist" to a Firefox user.
+  const advice = webgpuAdvice("no-adapter", { userAgent: UA.firefoxWindows });
+  assert.doesNotMatch(advice.summary, /Chrome/);
+});
+
 test("🔴 Firefox is not told it has WebGPU where it does not", () => {
   const linux = webgpuAdvice("missing", { userAgent: UA.firefoxLinux });
   assert.match(linux.summary, /Nightly-only|does not enable/);

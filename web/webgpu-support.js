@@ -157,6 +157,69 @@ const LINUX_FALLBACK = {
 };
 
 /**
+ * 🔴 FIREFOX'S PREFS, CHECKED AGAINST MOZILLA'S OWN `StaticPrefList.yaml` ON
+ * 2026-11-13 - because the first version of this advice named
+ * `gfx.webgpu.force-enabled`, WHICH DOES NOT EXIST. It appears in third-party
+ * guides; `grep force-enabled` over that file finds twenty-one prefs and none
+ * of them is this one. Telling a reader to create a pref that does nothing is
+ * worse than saying nothing, because they will believe they have tried it.
+ *
+ * What the file actually defines:
+ *
+ *   dom.webgpu.enabled         `true` on `XP_WIN`, or `XP_MACOSX &&
+ *                              MOZ_AARCH64`; otherwise `@IS_NIGHTLY_BUILD@` -
+ *                              so on LINUX it is on in Nightly and off in
+ *                              Release and Beta, and on an Intel Mac it is off.
+ *   gfx.webgpu.ignore-blocklist  `bool`, default `false`. The real blocklist
+ *                              override, and Chrome's `#ignore-gpu-blocklist`
+ *                              by another name.
+ *   dom.webgpu.wgpu-backend    names the wgpu backends, "vulkan" among them,
+ *                              which is why the Vulkan-driver check applies to
+ *                              Firefox on Linux as much as to Chrome.
+ */
+const FIREFOX_PREF = {
+  kind: "address",
+  do: "Open Firefox's configuration editor, accept the warning, search for"
+    + " dom.webgpu.enabled and set it to true, then restart. This is the only"
+    + " pref that turns the API on.",
+  paste: "about:config",
+};
+
+const FIREFOX_SUPPORT = {
+  kind: "address",
+  do: "Firefox's own graphics report - the equivalent of Chrome's GPU page."
+    + " Read the Graphics section for the WebGPU rows and any blocklist"
+    + " decision, and send that section if you report this.",
+  paste: "about:support",
+};
+
+const FIREFOX_BLOCKLIST = {
+  kind: "address",
+  do: "If the graphics report says WebGPU is blocklisted, this is the override:"
+    + " in about:config set gfx.webgpu.ignore-blocklist to true and restart. As"
+    + " with Chrome's, it bypasses a decision rather than fixing it - update the"
+    + " driver first if you can.",
+  paste: "about:config",
+};
+
+/**
+ * 🔴 AND A LINUX ESR IS THE ONE CASE WHERE "JUST FLIP THE PREF" IS BAD ADVICE.
+ * Mozilla's Andy Leiserson, on bugzilla 2063383: "ESR 153 does not officially
+ * support WebGPU on Linux", and they "do not plan to backport Linux-specific
+ * WebGPU security fixes to ESR153". The pref can still be flipped, which is
+ * exactly why this has to be said: a reader following generic instructions
+ * would enable a feature whose Linux security fixes are not coming.
+ */
+const ESR_CAUTION = {
+  kind: "none",
+  do: "If this is an ESR build, do not force it on. Mozilla state that ESR 153"
+    + " does not support WebGPU on Linux and that Linux-specific WebGPU"
+    + " security fixes are not being backported to it (bugzilla 2063383), so"
+    + " the pref would turn on code that is not being patched for you. Use a"
+    + " current Firefox, or Chrome, instead.",
+};
+
+/**
  * The browser and platform, read off a user-agent string.
  *
  * 🔴 UA SNIFFING, AND ONLY FOR ADVICE. `navigator.userAgentData` is
@@ -262,7 +325,14 @@ export function webgpuAdvice(stage, env = {}) {
     // machine has no hardware Vulkan driver. Naming the wrong cause first
     // sends someone to the wrong place even when the right step is further
     // down the list.
-    const why = os === "Linux"
+    const why = browser === "Firefox" && os === "Linux"
+      ? "On Linux, Firefox's WebGPU runs on Vulkan, so the usual causes are a"
+        + " blocklist decision or no hardware Vulkan driver on the machine."
+        + " Its graphics report says which."
+      : browser === "Firefox"
+        ? "Firefox's graphics report says whether it blocklisted WebGPU on this"
+          + " hardware, which is the usual reason."
+        : os === "Linux"
       ? "On Linux that is usually Vulkan: Chrome's WebGPU runs on it, and"
         + " turning WebGPU on without a Vulkan backend behind it gives exactly"
         + " this - the API present, no adapter to hand out. Either the Vulkan"
@@ -286,12 +356,20 @@ export function webgpuAdvice(stage, env = {}) {
           ACCELERATION, CHECK_GPU, BLOCKLIST,
           ...(os === "Windows" ? [HIGH_PERFORMANCE] : []),
           ...(os === "Linux" ? [VULKANINFO, LINUX_FALLBACK] : [])]
-        : [{
-          kind: "none",
-          do: "Check that hardware acceleration is on in your browser's"
-            + " settings and that your graphics driver is current, then"
-            + " relaunch.",
-        }],
+        : browser === "Firefox"
+          // 🔴 FIREFOX GOT ONE GENERIC SENTENCE HERE, which is no better than
+          // the Chrome branch was before it was fixed. Its graphics report and
+          // its blocklist override are different controls with different names,
+          // and on Linux its wgpu backend is Vulkan too - so the driver check
+          // is the same question.
+          ? [FIREFOX_SUPPORT, FIREFOX_BLOCKLIST,
+            ...(os === "Linux" ? [VULKANINFO, ESR_CAUTION] : [])]
+          : [{
+            kind: "none",
+            do: "Check that hardware acceleration is on in your browser's"
+              + " settings and that your graphics driver is current, then"
+              + " relaunch.",
+          }],
       diagnostics,
       agent,
     };
@@ -344,14 +422,10 @@ export function webgpuAdvice(stage, env = {}) {
           + " is Nightly-only.";
     return {
       summary: `${where} Current Chrome is the surest route on this platform;`
-        + " in Firefox you can try the switch below, which is experimental.",
-      steps: [{
-        kind: "address",
-        do: "Open Firefox's configuration editor, search for"
-          + " dom.webgpu.enabled and set it to true, then restart. On Linux you"
-          + " may also need gfx.webgpu.force-enabled.",
-        paste: "about:config",
-      }],
+        + " in Firefox the pref below turns the API on, which is experimental"
+        + " rather than supported.",
+      steps: [FIREFOX_PREF, FIREFOX_SUPPORT,
+        ...(os === "Linux" ? [ESR_CAUTION] : [])],
       diagnostics,
       agent,
     };
