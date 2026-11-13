@@ -758,6 +758,23 @@ function showGpuHelp(advice) {
   // report that started this was a photograph of a sentence: no browser
   // version, no platform, no failure stage. One copyable line turns the next
   // report into something that can be acted on.
+  // 🔴 AND THE LONG VERSION IS ONE CLICK AWAY. The steps above are the short
+  // path; a reader who has worked through them and is still stuck needs the
+  // ordered guide with the driver checks and the fallback launch, and they are
+  // on the page that just failed - the worst moment to go looking. An https://
+  // link IS clickable, unlike the chrome:// addresses above.
+  const more = document.createElement("p");
+  more.className = "gpu-diag-label";
+  const link = document.createElement("a");
+  link.href = "https://github.com/pablo-arantes/boltz2-webgpu/blob/main/docs/"
+    + "WEBGPU-ON-LINUX.md";
+  link.textContent = "the full step-by-step guide for Chrome and Firefox on"
+    + " Linux";
+  more.append(document.createTextNode("Still stuck? "), link,
+              document.createTextNode(" — it covers the graphics driver checks"
+                + " and the fallback launch as well as these flags."));
+  panel.append(more);
+
   const label = document.createElement("p");
   label.className = "gpu-diag-label";
   label.textContent = "If none of that helps, copy this line into an issue"

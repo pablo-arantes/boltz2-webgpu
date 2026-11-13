@@ -286,6 +286,59 @@ test("🔴 no step is a clickable link, because chrome:// cannot be one", () => 
   }
 });
 
+test("🔴 the Linux guide's steps are the ones the page actually offers", () => {
+  // 🔴 A FIFTH COPY, AND THE ONE THAT GETS SENT TO PEOPLE. docs/WEBGPU-ON-LINUX.md
+  // is linked from the error panel, so a reader following it has already failed
+  // once - a step the page no longer offers, or a pref that does not exist,
+  // costs them a second round trip. Every address the guide gives must be one
+  // this module gives for the matching browser and stage.
+  const guide = readFileSync(
+    new URL("../docs/WEBGPU-ON-LINUX.md", import.meta.url), "utf8");
+  // 🔴 COMPARED WITH CONTINUATIONS FOLDED, because the long launch line is
+  // wrapped with a backslash in the guide for readability and is one line in
+  // the page. Comparing them verbatim fails on the formatting rather than on
+  // the content, which is not what this test is for.
+  const flat = guide.replace(/\\\n\s*/g, " ").replace(/\s+/g, " ");
+  const chrome = new Set([
+    ...pastes(webgpuAdvice("missing", { userAgent: UA.chromeLinux })),
+    ...pastes(webgpuAdvice("no-adapter", { userAgent: UA.chromeLinux })),
+  ]);
+  for (const paste of chrome) {
+    assert.ok(flat.includes(paste.replace(/\s+/g, " ")),
+      `the guide does not mention ${paste}, which the page tells a Linux`
+      + " Chrome reader to use");
+  }
+  const firefox = new Set([
+    ...pastes(webgpuAdvice("missing", { userAgent: UA.firefoxLinux })),
+    ...pastes(webgpuAdvice("no-adapter", { userAgent: UA.firefoxLinux })),
+  ]);
+  for (const paste of firefox) {
+    assert.ok(flat.includes(paste.replace(/\s+/g, " ")),
+      `the guide does not mention ${paste}`);
+  }
+  // the facts a reader acts on, each sourced in the guide's own last section
+  for (const fact of ["dom.webgpu.enabled", "gfx.webgpu.ignore-blocklist",
+                      "llvmpipe", "ozone-platform=x11",
+                      "--enable-features=Vulkan", "ESR 153",
+                      "Intel Gen12+", "144"]) {
+    assert.ok(guide.includes(fact), `the guide lost "${fact}"`);
+  }
+  // 🔴 AND EVERY MENTION OF THE PREF THAT DOES NOT EXIST MUST SAY SO. Written
+  // as a lookahead first, which failed on its own punctuation and told me
+  // nothing - a test I cannot read is a test I cannot trust. Plainly: find the
+  // mentions, and require each one's own sentence to deny it.
+  const mentions = [...flat.matchAll(/gfx\.webgpu\.force-enabled/g)];
+  assert.ok(mentions.length > 0,
+    "the guide should warn that the pref third-party guides name is not real");
+  for (const mention of mentions) {
+    const sentence = flat.slice(Math.max(0, mention.index - 120),
+                                mention.index + 160);
+    assert.match(sentence,
+      /does not exist|is \*\*no\*\*|no `gfx|none of them|not a real/,
+      `a mention of force-enabled that does not deny it: "...${sentence}..."`);
+  }
+});
+
 test("🔴 the README's support table is this module's, not a second copy", () => {
   // 🔴 TWO LISTS OF VERSION NUMBERS IS ONE LIST THAT GOES STALE, and the stale
   // one is always the prose. The README prints every row of WEBGPU_BY_DEFAULT.

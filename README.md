@@ -123,7 +123,9 @@ python3 tools/serve.py        # any static server will do; the page is static
   --summary` in a terminal, after `sudo apt install mesa-vulkan-drivers
   vulkan-tools` on Debian or Ubuntu. A summary listing only `llvmpipe` or
   `lavapipe` is software rendering, and no browser flag fixes a missing driver.
-  The page prints these steps itself, labelled by where each one goes.
+  The page prints these steps itself, labelled by where each one goes, and
+  **[docs/WEBGPU-ON-LINUX.md](docs/WEBGPU-ON-LINUX.md) is the full ordered
+  guide** for both browsers — send that link to anyone who is stuck.
 
   🔴 **Firefox on Linux is a different answer.** `dom.webgpu.enabled` defaults
   to true only on Windows and on Apple-silicon macOS — everywhere else it is

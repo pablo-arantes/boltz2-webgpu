@@ -267,8 +267,20 @@ test("every source path named in python, yaml, html or markdown exists", () => {
   // and `src/reference/` has not existed since the reorganisation. A rule that
   // requires a `.js` suffix reads those as prose.
   const DIRECTORY = /(?<![\w.@-])\/?((?:src|shared|cpu|webgpu|webgl)\/[a-z0-9-]+(?:\/[a-z0-9-]+)*)\/?(?![\w./-])/g;
+  // 🔴 A URL IS NOT A PATH IN THIS TREE, AND ONE CAUGHT THIS GATE OUT.
+  // docs/WEBGPU-ON-LINUX.md cites Chrome's own troubleshooting page, which
+  // lives at
+  // developer.chrome.com/docs/web-platform/webgpu/troubleshooting-tips - and
+  // `webgpu/` IS a directory here, so the DIRECTORY rule read a foreign URL as
+  // a claim about our tree and failed on a correct document. The lookbehind
+  // cannot see far enough to tell: by the time the regex reaches `webgpu/` the
+  // host and the rest of the path are long behind it. So URLs come out before
+  // the rules run, which costs nothing - a path of OURS never sits inside an
+  // http(s) URL, and if one ever did it would be a bug in the document rather
+  // than something this gate should resolve.
+  const withoutUrls = (text) => text.replace(/https?:\/\/[^\s)<>"'`\]]+/g, " ");
   for (const file of files) {
-    const text = readFileSync(file, "utf8");
+    const text = withoutUrls(readFileSync(file, "utf8"));
     const relative = file.slice(ROOT.length + 1);
     for (const match of text.matchAll(PATH)) {
       const named_path = match[1];
