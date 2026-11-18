@@ -33,6 +33,8 @@ import { drawScatter, drawTable, DEFAULT_SORT, startsDescending }
   from "./screen-view.js";
 import { screenArchive, statusOf } from "./screen-export.js";
 import { targetSizeAdvice, readChains } from "./target-size.js";
+import { colabRole, installColabBridge, askRuntimeToScreen,
+  askRuntimeToStop, colabHealth } from "./colab-bridge.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -124,10 +126,27 @@ function showTargetSize() {
   return advice;
 }
 
+/**
+ * Where this page's commentary goes when it is somebody else's screen.
+ *
+ * 🔴 INERT ON EVERY ORDINARY PAGE, which is the whole design. A screen on a
+ * Colab GPU runs THIS controller in a headless browser on that machine, and the
+ * reader watching from their laptop needs every status line and every result as
+ * it happens - so the runtime half of web/colab-bridge.js installs a tap and
+ * the events go out in the same task that made them. With no tap installed this
+ * is one `=== null` per call and nothing else; screen.html and a local run never
+ * know it is here.
+ */
+let tap = () => {};
+
+/** Called by the bridge on a runtime page. See web/colab-bridge.js. */
+function installScreenTap(sink) { tap = typeof sink === "function" ? sink : () => {}; }
+
 function say(message, bad = false) {
   const box = $("screen-status");
   box.textContent = message;
   box.classList.toggle("bad", bad === true);
+  tap("status", { message, bad: bad === true });
 }
 
 /**
@@ -799,6 +818,61 @@ function showGpuHelp(advice) {
   panel.hidden = false;
 }
 
+/**
+ * One finished ligand, from this GPU or from a runtime's.
+ *
+ * 🔴 ONE PATH, BECAUSE THE SECOND ONE WOULD DRIFT. A screen on a Colab GPU
+ * sends each result here over the broker (web/colab-bridge.js), and a reader's
+ * page has no device at all - so if the remote feed had its own copy of this,
+ * the scene, the plate and the table would be assembled two different ways and
+ * the hour-long run is the one nobody would re-check.
+ */
+function acceptResult(result) {
+  state.runningId = null;
+  state.results = [...state.results, result];
+  if (typeof result.pdb === "string" && result.pdb.length > 0) {
+    // 🔴 A DRAWING FAILURE MUST NOT COST THE LIGAND ITS RESULT. This handler
+    // runs inside the run loop's try, so a throw here was caught as a LIGAND
+    // failure: each ligand got a result row AND a failure row, and the probe
+    // read 4 rows for 2 ligands. It was a real throw (a legend referencing
+    // deleted variables), and the scene is a picture - the numbers are the work.
+    try {
+      state.scene.add(result.id, result.pdb);
+      state.visible.add(result.id);
+      drawScene();
+    } catch (error) {
+      console.error("the scene could not be drawn", error);
+    }
+  }
+  refresh();
+  tap("result", { result });
+}
+
+/** ...and one that failed, by the same route. */
+function acceptFailure(failure) {
+  state.runningId = null;
+  // 🔴 A LOST DEVICE OR A FATAL OOM ENDS THE RUN; it does not produce N
+  // identical failure rows. The weights live on the dead device, so every
+  // remaining ligand would fail the same way and bury the one message that
+  // matters. Earlier results stay downloadable.
+  if (/device is lost|device was lost|GPUDevice|out of memory|budget/i
+      .test(String(failure.error))) {
+    state.controller?.abort();
+    state.deviceLost = true;
+  }
+  state.results = [...state.results,
+    { id: failure.id, smiles: failure.smiles, error: failure.error,
+      name: failure.name }];
+  // 🔴 A FAILURE IS SHOWN, NOT ONLY COUNTED. The run loop catches every
+  // ligand's error so one bad SMILES cannot end a screen - which also means a
+  // real bug arrives as a row with a dash in it unless the page says what
+  // happened.
+  say(`${failure.id}: ${failure.error}`, true);
+  if (failure.stack !== undefined) console.error(failure.id, failure.stack);
+  refresh();
+  tap("failed", { failure });
+}
+
 async function boot() {
   say("Asking for a WebGPU device…");
   let device;
@@ -982,45 +1056,9 @@ async function screen() {
           : `~${Math.round(eta.seconds)} s remaining`;
         renderQueue();
       } else if (phase === "done") {
-        state.runningId = null;
-        state.results = [...state.results, result];
-        if (typeof result.pdb === "string" && result.pdb.length > 0) {
-          // 🔴 A DRAWING FAILURE MUST NOT COST THE LIGAND ITS RESULT. This
-          // handler runs inside the run loop's try, so a throw here was caught
-          // as a LIGAND failure: each ligand got a result row AND a failure
-          // row, and the probe read 4 rows for 2 ligands. It was a real throw
-          // (a legend referencing deleted variables), and the scene is a
-          // picture - the numbers are the work.
-          try {
-            state.scene.add(result.id, result.pdb);
-            state.visible.add(result.id);
-            drawScene();
-          } catch (error) {
-            console.error("the scene could not be drawn", error);
-          }
-        }
-        refresh();
+        acceptResult(result);
       } else if (phase === "failed") {
-        state.runningId = null;
-        // 🔴 A LOST DEVICE OR A FATAL OOM ENDS THE RUN; it does not produce N
-        // identical failure rows. The weights live on the dead device, so
-        // every remaining ligand would fail the same way and bury the one
-        // message that matters. Earlier results stay downloadable.
-        if (/device is lost|device was lost|GPUDevice|out of memory|budget/i
-            .test(String(failure.error))) {
-          state.controller?.abort();
-          state.deviceLost = true;
-        }
-        state.results = [...state.results,
-          { id: failure.id, smiles: failure.smiles, error: failure.error,
-            name: failure.name }];
-        // 🔴 A FAILURE IS SHOWN, NOT ONLY COUNTED. The run loop catches every
-        // ligand's error so one bad SMILES cannot end a screen - which also
-        // means a real bug arrives as a row with a dash in it unless the page
-        // says what happened.
-        say(`${failure.id}: ${failure.error}`, true);
-        if (failure.stack !== undefined) console.error(failure.id, failure.stack);
-        refresh();
+        acceptFailure(failure);
       }
     },
   });
@@ -1041,6 +1079,14 @@ async function screen() {
   $("eta").textContent = "";
   const done = state.results.filter((result) => statusOf(result) === "done").length;
   const seconds = ((Date.now() - startedAt) / 1000).toFixed(0);
+  // 🔴 ONE EVENT THAT MEANS "THE SCREEN IS OVER", HOWEVER IT ENDED. The broker
+  // raises its one-screen-at-a-time flag when it accepts a command and lowers
+  // it on this - so a port that lowered it on a RESULT would free the GPU after
+  // the first ligand of a hundred, and one that never sent it would refuse
+  // every later screen for the rest of the session.
+  tap("finished", { done, attempted: state.jobs.length, seconds,
+                    stopped: run.stopped === true,
+                    deviceLost: state.deviceLost === true });
   if (state.deviceLost === true) {
     say(`the GPU device was lost after ${done} ligand(s) - the weights went`
       + " with it, so the run stopped. Your finished results are still"
@@ -1060,6 +1106,57 @@ async function screen() {
       ? " - below upstream's 200, so read the ranking rather than the numbers"
       : ""));
   refresh();
+}
+
+/**
+ * The reader's Run: ask the runtime, and let its events fill this page.
+ *
+ * 🔴 THE SAME VALIDATION FIRST, because a target past the runtime's ceiling is
+ * refused by arithmetic rather than by trying - and the ceiling here is the
+ * RUNTIME's, which `/health` reported and `boot` wrote into `state.remote`.
+ * Without that this page would check a laptop's 2,048 against a target an A100
+ * could hold, which is the exact thing a reader came to Colab to escape.
+ */
+async function screenRemotely() {
+  const sequence = $("sequence").value.replace(/\s+/g, "").toUpperCase();
+  if (sequence.length < 4) { say("paste a protein sequence first", true); return; }
+  const entries = readLigands();
+  if (entries.length === 0) { say("no ligands to screen", true); return; }
+  const size = showTargetSize();
+  if (size.level === "refuse") { say(size.message, true); return; }
+
+  state.scene.clear();
+  state.visible.clear();
+  state.results = [];
+  state.sequence = sequence;
+  state.jobs = entries.map((entry) => ({ id: entry.id, smiles: entry.smiles }));
+  state.settings = {
+    recyclingSteps: Number($("recycles").value),
+    samplingSteps: Number($("steps").value),
+    diffusionSamples: Number($("samples").value),
+  };
+  renderQueue();
+  refresh();
+
+  $("run").disabled = true;
+  $("stop").disabled = false;
+  say(`asked the runtime to screen ${entries.length} ligand(s)…`);
+  try {
+    await askRuntimeToScreen({
+      sequence: $("sequence").value,
+      ligands: $("ligands").value,
+      msa: $("msa").value,
+      seed: $("seed").value, recycles: $("recycles").value,
+      steps: $("steps").value, samples: $("samples").value,
+    });
+  } catch (error) {
+    // 🔴 "one GPU, one screen" IS THE ANSWER A READER NEEDS TO SEE. The broker
+    // refuses a second screen with 429 and its reason; swallowing that leaves a
+    // Run button that did nothing.
+    $("run").disabled = false;
+    $("stop").disabled = true;
+    say(`the runtime refused: ${error?.message ?? error}`, true);
+  }
 }
 
 function wire() {
@@ -1128,4 +1225,100 @@ function wire() {
 wire();
 refresh();
 showDeviceCeiling();
-boot().catch((error) => say(String(error?.message ?? error), true));
+
+/**
+ * 🔴 WHICH MACHINE SCREENS, DECIDED ONCE AT LOAD. A reader's page has no device
+ * and must not ask for one: `boot()` would fetch 365 MiB of weights it will
+ * never use and then report "this browser has no WebGPU" on a laptop that is
+ * only ever going to watch. A runtime page boots exactly as an ordinary one
+ * does - it IS an ordinary one, with a tap installed.
+ */
+const COLAB_ROLE = installColabBridge({
+  say,
+  acceptResult,
+  acceptFailure,
+  installTap: installScreenTap,
+  remoteStarted: (payload) => {
+    // the runtime echoes what it was asked, so a reader who arrived mid-screen
+    // gets the plate and the queue rather than an empty page
+    if (typeof payload.ligands === "string" && $("ligands").value === "") {
+      $("ligands").value = payload.ligands;
+      readLigands();
+    }
+    if (typeof payload.sequence === "string" && $("sequence").value === "") {
+      $("sequence").value = payload.sequence;
+      showTargetSize();
+    }
+  },
+  remoteState: (said) => {
+    if (said.screening === false && state.running === true) {
+      state.running = false;
+      $("run").disabled = false;
+      $("stop").disabled = true;
+    }
+  },
+  finish: (event) => {
+    state.running = false;
+    $("run").disabled = false;
+    $("stop").disabled = true;
+    $("eta").textContent = "";
+    say(`${event.done ?? 0} of ${event.attempted ?? 0} ligands scored in`
+      + ` ${event.seconds ?? "?"} s on the runtime's GPU`
+      + (event.stopped ? " (stopped)" : "")
+      + (event.deviceLost ? " - the runtime's device was lost" : ""));
+    refresh();
+  },
+});
+
+if (COLAB_ROLE === "reader") {
+  // 🔴 THE READER'S RUN IS A DIFFERENT ACTION, so the listener is replaced
+  // rather than guarded inside `screen()`: that function needs a device in its
+  // first ten lines, and a page that has none should never reach it.
+  const run = $("run");
+  const fresh = run.cloneNode(true);
+  run.replaceWith(fresh);
+  fresh.disabled = true;
+  fresh.addEventListener("click", () => {
+    screenRemotely().catch((error) => say(String(error?.message ?? error), true));
+  });
+  $("stop").addEventListener("click", () => {
+    // 🔴 THE RUNTIME'S STOP, NOT THIS PAGE'S. `wire()` already attached a local
+    // handler that aborts `state.controller` - which on a reader is null, so it
+    // would say "stopping after this ligand…" about a ligand this machine is
+    // not folding. This one goes over the broker.
+    askRuntimeToStop().then(() => say("asked the runtime to stop…"))
+      .catch((error) => say(`could not reach the runtime: ${error?.message}`,
+                            true));
+  });
+  say("connecting to the runtime…");
+  colabHealth().then((health) => {
+    const card = health.gpu ?? {};
+    const name = `${card.vendor ?? "?"} ${card.architecture ?? ""}`.trim();
+    const ceiling = health.residueCeiling;
+    const fallback = /swiftshader|llvmpipe/i.test(JSON.stringify(card));
+    $("run").disabled = false;
+    // 🔴 AND IF IT IS THE CPU RENDERER, SAY SO LOUDLY. Upstream's notebook
+    // learned this: swiftshader looks exactly like success and every number
+    // after it is a CPU's.
+    say(fallback
+      ? `the runtime reports ${name}, which is the CPU renderer and not a card`
+        + " - change the Colab runtime type to a GPU and run the cell again"
+      : `screening on the runtime's ${name}`
+        + (typeof ceiling === "number"
+          ? ` · it can hold a target up to about ${ceiling} residues` : "")
+        + (card.shaderF16 ? " · shader-f16" : ""), fallback);
+    const line = $("limits-device");
+    if (line !== null && typeof ceiling === "number") {
+      line.textContent = `This screen is running on a remote runtime's GPU`
+        + ` (${name}), which can hold a target up to about ${ceiling}`
+        + " residues - not this browser's.";
+    }
+  }).catch((error) => {
+    say(`could not reach the runtime: ${error?.message ?? error}`, true);
+  });
+} else {
+  boot().catch((error) => say(String(error?.message ?? error), true));
+  if (COLAB_ROLE === "runtime") {
+    console.log("this page is a Colab runtime: it screens and reports");
+  }
+}

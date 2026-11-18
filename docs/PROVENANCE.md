@@ -63,6 +63,31 @@ was written here:
 - **The MSA client** (`shared/input/mmseqs2-api.js`), the PDB writer, the ZIP
   writer, py2Dmol and its viewer DOM, and the Horn/Kabsch superposition in
   `web/pdb-superpose.js`.
+- **The Colab arrangement** — `tools/colab_backend.py` and the shape of
+  `web/colab-bridge.js` are ported from LocalFold's own, with most of their
+  comments: the five token-checked routes (`/health`, `/in`, `/out`, `/up`,
+  `/down`), the two append-only mailboxes read by watermark, `head=1` on both
+  sides, the `hmac.compare_digest` token, the browser-process liveness check
+  that a busy page cannot fail, `--disable-vulkan-surface`, the
+  `TBE_RUNTIME_ADDR` unassign, and the notebook's whole setup script
+  (a zipped Chrome, the NVIDIA GL package unpacked rather than installed, and
+  the bare-`wait` trap its own comment records).
+
+  🔴 **AND THEY ARE TAKEN FROM A REVISION THAT NO LONGER EXISTS UPSTREAM.**
+  Both files were removed from LocalFold on 2026-11-01 (`1725c392ef`) when
+  every fold there went to a native CUDA worker — its own notebook now starts a
+  file that is not in its tree. These are ported from **`af474628e0`**, the last
+  revision that carried them. We cannot follow it to the CUDA design: this
+  repository has no native port of the affinity module, the screen is
+  WebGPU-only, and the headless-runtime arrangement is what works for it.
+  `web/native-bridge.js` — already here, the reader half of the *newer* design —
+  is reused rather than written twice.
+
+  What is **ours**: the unit of work. Upstream brokers one fold; a screen is N
+  ligands, so the events are the run loop's own, the one-at-a-time flag is
+  lowered by the screen *finishing* rather than by a structure arriving,
+  `/health` carries the residue ceiling the whole thing exists for, and
+  `/down?wait=` is honoured because this tree's reader already asks for it.
 
 ## What is reverse-engineered from upstream Boltz
 

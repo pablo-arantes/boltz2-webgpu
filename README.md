@@ -253,6 +253,26 @@ refused; the paired search a complex needs (`ticket/pair`, `mergeChainA3ms`)
 exists in `shared/input/mmseqs2-api.js` and the fold page uses it. A complex
 screens as single sequence and the page says so rather than failing quietly.
 
+### A target too big for this browser: use a Colab GPU
+
+The ceiling above is your own machine's. `notebooks/boltz2_webgpu.ipynb` runs
+the same page on a Colab GPU instead — one cell, one link, and the page you
+click is this repository served from that machine, so the ceiling becomes that
+card's. The link box prints the number it measured.
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pablo-arantes/boltz2-webgpu/blob/main/notebooks/boltz2_webgpu.ipynb)
+
+Choose a GPU first (Runtime ▸ Change runtime type). Keep the notebook running
+while you use the page; Disconnect hands the machine back. The first screen
+downloads 365 MiB of weights **on the runtime**, so it is slower than the ones
+after it.
+
+🔴 **The screen that runs there is this page's own code**, in a headless browser
+on that card — the runtime fills the page's controls and presses its own Run,
+and your browser is a reader with no GPU that draws each result as it lands.
+[docs/COLAB.md](docs/COLAB.md) has the arrangement, what was measured, and the
+one part that can only be verified by running it on Colab.
+
 ### Rank cheap, then measure the hits properly
 
 The defaults (3 recycles / 100 steps) are already below Boltz-2's own affinity
